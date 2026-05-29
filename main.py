@@ -444,7 +444,12 @@ Question:
 {question}
 """
 
-    return call_sarvam_chat(prompt).strip()
+    answer = call_sarvam_chat(prompt)
+
+    if answer is None:
+        return ""
+
+    return str(answer).strip()
 
 
 def call_sarvam_chat(prompt: str) -> str:
@@ -481,15 +486,34 @@ def call_sarvam_chat(prompt: str) -> str:
 
     data = response.json()
 
-    return (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-    )
+    choices = data.get("choices") or []
 
+    if not choices:
+        raise RuntimeError(f"Sarvam chat returned no choices: {data}")
 
-def safe_json_parse(text: str) -> Dict[str, Any]:
-    cleaned = text.strip()
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+
+    if content is None:
+        content = ""
+
+    return str(content)
+    
+
+def safe_json_parse(text: Any) -> Dict[str, Any]:
+    if text is None:
+        return {
+            "summary": "",
+            "discussionPoints": [],
+        }
+
+    cleaned = str(text).strip()
+
+    if not cleaned:
+        return {
+            "summary": "",
+            "discussionPoints": [],
+        }
 
     if cleaned.startswith("```"):
         cleaned = cleaned.replace("```json", "")
@@ -531,7 +555,7 @@ def safe_json_parse(text: str) -> Dict[str, Any]:
         )
 
     return {
-        "summary": str(summary),
+        "summary": str(summary or ""),
         "discussionPoints": normalized_points,
     }
 
