@@ -18,9 +18,10 @@ load_dotenv()
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SARVAM_CHAT_MODEL = os.getenv("SARVAM_CHAT_MODEL", "sarvam-105b")
 SARVAM_STT_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
-SARVAM_STT_MODE = os.getenv("SARVAM_STT_MODE", "codemix")
-SARVAM_LANGUAGE_CODE = os.getenv("SARVAM_LANGUAGE_CODE", "hi-IN")
-SARVAM_NUM_SPEAKERS = int(os.getenv("SARVAM_NUM_SPEAKERS", "2"))
+
+DEFAULT_STT_MODE = os.getenv("DEFAULT_STT_MODE", "codemix")
+DEFAULT_LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "hi-IN")
+DEFAULT_NUM_SPEAKERS = int(os.getenv("DEFAULT_NUM_SPEAKERS", "0"))
 
 if not SARVAM_API_KEY:
     raise RuntimeError("SARVAM_API_KEY is missing in environment variables")
@@ -57,6 +58,9 @@ async def process_meeting(
     background_tasks: BackgroundTasks,
     meeting_id: str = Form(...),
     audio: UploadFile = File(...),
+    stt_mode: str = Form(DEFAULT_STT_MODE),
+    language_code: str = Form(DEFAULT_LANGUAGE_CODE),
+    num_speakers: int = Form(DEFAULT_NUM_SPEAKERS),
 ):
     job_id = str(uuid.uuid4())
     temp_dir = tempfile.mkdtemp()
@@ -64,6 +68,10 @@ async def process_meeting(
     audio_path = os.path.join(temp_dir, file_name)
 
     try:
+        validated_stt_mode = validate_stt_mode(stt_mode)
+        validated_language_code = validate_language_code(language_code)
+        validated_num_speakers = validate_num_speakers(num_speakers)
+
         with open(audio_path, "wb") as buffer:
             shutil.copyfileobj(audio.file, buffer)
 
@@ -73,6 +81,11 @@ async def process_meeting(
                 "meetingId": meeting_id,
                 "status": "queued",
                 "message": "Meeting processing queued",
+                "settings": {
+                    "sttMode": validated_stt_mode,
+                    "languageCode": validated_language_code,
+                    "numSpeakers": validated_num_speakers,
+                },
                 "result": None,
                 "error": None,
             }
@@ -83,6 +96,9 @@ async def process_meeting(
             meeting_id,
             audio_path,
             temp_dir,
+            validated_stt_mode,
+            validated_language_code,
+            validated_num_speakers,
         )
 
         return {
@@ -90,6 +106,11 @@ async def process_meeting(
             "meetingId": meeting_id,
             "status": "queued",
             "message": "Meeting processing started",
+            "settings": {
+                "sttMode": validated_stt_mode,
+                "languageCode": validated_language_code,
+                "numSpeakers": validated_num_speakers,
+            },
         }
 
     except Exception as exc:
@@ -124,11 +145,55 @@ async def ask_question(request: AskQuestionRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def validate_stt_mode(value: str) -> str:
+    allowed_modes = {
+        "transcribe",
+        "translate",
+        "verbatim",
+        "translit",
+        "codemix",
+    }
+
+    mode = str(value or DEFAULT_STT_MODE).strip().lower()
+
+    if mode not in allowed_modes:
+        return DEFAULT_STT_MODE
+
+    return mode
+
+
+def validate_language_code(value: str) -> str:
+    language_code = str(value or DEFAULT_LANGUAGE_CODE).strip()
+
+    if not language_code:
+        return DEFAULT_LANGUAGE_CODE
+
+    return language_code
+
+
+def validate_num_speakers(value: int) -> int:
+    try:
+        count = int(value)
+    except Exception:
+        count = DEFAULT_NUM_SPEAKERS
+
+    if count < 0:
+        return 0
+
+    if count > 20:
+        return 20
+
+    return count
+
+
 def process_meeting_background(
     job_id: str,
     meeting_id: str,
     audio_path: str,
     temp_dir: str,
+    stt_mode: str,
+    language_code: str,
+    num_speakers: int,
 ):
     try:
         update_job(
@@ -137,7 +202,12 @@ def process_meeting_background(
             message="Transcribing meeting audio",
         )
 
-        transcription_result = transcribe_with_sarvam(audio_path)
+        transcription_result = transcribe_with_sarvam(
+            audio_path=audio_path,
+            stt_mode=stt_mode,
+            language_code=language_code,
+            num_speakers=num_speakers,
+        )
 
         transcript_text = transcription_result["transcriptText"]
         utterances = transcription_result["utterances"]
@@ -202,16 +272,25 @@ def get_sarvam_client() -> SarvamAI:
     return SarvamAI(api_subscription_key=SARVAM_API_KEY)
 
 
-def transcribe_with_sarvam(audio_path: str) -> Dict[str, Any]:
+def transcribe_with_sarvam(
+    audio_path: str,
+    stt_mode: str,
+    language_code: str,
+    num_speakers: int,
+) -> Dict[str, Any]:
     client = get_sarvam_client()
 
-    job = client.speech_to_text_job.create_job(
-        model=SARVAM_STT_MODEL,
-        mode=SARVAM_STT_MODE,
-        language_code=SARVAM_LANGUAGE_CODE,
-        with_diarization=True,
-        num_speakers=SARVAM_NUM_SPEAKERS,
-    )
+    create_job_args: Dict[str, Any] = {
+        "model": SARVAM_STT_MODEL,
+        "mode": stt_mode,
+        "language_code": language_code,
+        "with_diarization": True,
+    }
+
+    if num_speakers > 0:
+        create_job_args["num_speakers"] = num_speakers
+
+    job = client.speech_to_text_job.create_job(**create_job_args)
 
     job.upload_files(file_paths=[audio_path])
     job.start()
