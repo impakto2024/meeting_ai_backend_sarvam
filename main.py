@@ -1,3 +1,4 @@
+import time
 import json
 import os
 import shutil
@@ -51,6 +52,38 @@ def health_check():
         "status": "ok",
         "message": "Meeting AI backend is running",
     }
+
+@app.post("/upload-debug")
+async def upload_debug(audio: UploadFile = File(...)):
+    started_at = time.time()
+    temp_dir = tempfile.mkdtemp()
+    file_name = audio.filename or "debug_audio.m4a"
+    audio_path = os.path.join(temp_dir, file_name)
+
+    size_bytes = 0
+
+    try:
+        with open(audio_path, "wb") as buffer:
+            while True:
+                chunk = await audio.read(1024 * 1024)
+                if not chunk:
+                    break
+
+                size_bytes += len(chunk)
+                buffer.write(chunk)
+
+        elapsed_seconds = time.time() - started_at
+
+        return {
+            "status": "ok",
+            "fileName": file_name,
+            "sizeBytes": size_bytes,
+            "sizeMb": round(size_bytes / 1024 / 1024, 2),
+            "seconds": round(elapsed_seconds, 2),
+        }
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @app.post("/process-meeting")
