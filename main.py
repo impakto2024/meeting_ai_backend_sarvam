@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sarvamai import SarvamAI
@@ -55,7 +55,6 @@ def health_check():
 
 @app.post("/process-meeting")
 async def process_meeting(
-    background_tasks: BackgroundTasks,
     meeting_id: str = Form(...),
     audio: UploadFile = File(...),
     stt_mode: str = Form(DEFAULT_STT_MODE),
@@ -90,16 +89,21 @@ async def process_meeting(
                 "error": None,
             }
 
-        background_tasks.add_task(
-            process_meeting_background,
-            job_id,
-            meeting_id,
-            audio_path,
-            temp_dir,
-            validated_stt_mode,
-            validated_language_code,
-            validated_num_speakers,
+        worker_thread = threading.Thread(
+            target=process_meeting_background,
+            args=(
+                job_id,
+                meeting_id,
+                audio_path,
+                temp_dir,
+                validated_stt_mode,
+                validated_language_code,
+                validated_num_speakers,
+            ),
+            daemon=True,
         )
+
+        worker_thread.start()
 
         return {
             "jobId": job_id,
@@ -117,6 +121,67 @@ async def process_meeting(
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
+    
+
+def process_meeting_background(
+    job_id: str,
+    meeting_id: str,
+    audio_path: str,
+    temp_dir: str,
+    stt_mode: str,
+    language_code: str,
+    num_speakers: int,
+):
+    try:
+        update_job(
+            job_id,
+            status="transcribing",
+            message="Transcribing meeting audio",
+        )
+
+        transcription_result = transcribe_with_sarvam(
+            audio_path=audio_path,
+            stt_mode=stt_mode,
+            language_code=language_code,
+            num_speakers=num_speakers,
+        )
+
+        transcript_text = transcription_result["transcriptText"]
+        utterances = transcription_result["utterances"]
+
+        update_job(
+            job_id,
+            status="analyzing",
+            message="Creating summary and discussion points",
+        )
+
+        analysis_result = analyze_meeting(transcript_text)
+
+        result = {
+            "meetingId": meeting_id,
+            "summary": analysis_result.get("summary", ""),
+            "discussionPoints": analysis_result.get("discussionPoints", []),
+            "transcriptText": transcript_text,
+            "utterances": utterances,
+        }
+
+        update_job(
+            job_id,
+            status="completed",
+            message="Meeting processing completed",
+            result=result,
+        )
+
+    except Exception as exc:
+        update_job(
+            job_id,
+            status="failed",
+            message="Meeting processing failed",
+            error=str(exc),
+        )
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 @app.get("/meeting-status/{job_id}")
 def meeting_status(job_id: str):
