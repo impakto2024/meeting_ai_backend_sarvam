@@ -20,8 +20,8 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SARVAM_CHAT_MODEL = os.getenv("SARVAM_CHAT_MODEL", "sarvam-105b")
 SARVAM_STT_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
 
-DEFAULT_STT_MODE = os.getenv("DEFAULT_STT_MODE", "codemix")
-DEFAULT_LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "hi-IN")
+DEFAULT_STT_MODE = os.getenv("DEFAULT_STT_MODE", "transcribe")
+DEFAULT_LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "en-IN")
 DEFAULT_NUM_SPEAKERS = int(os.getenv("DEFAULT_NUM_SPEAKERS", "0"))
 
 if not SARVAM_API_KEY:
@@ -342,15 +342,26 @@ def process_meeting_background(
         update_job(
             job_id,
             status="analyzing",
-            message="Creating summary and discussion points",
+            message="Creating meeting analysis",
         )
 
         analysis_result = analyze_meeting(transcript_text)
 
         result = {
             "meetingId": meeting_id,
-            "summary": analysis_result.get("summary", ""),
+            "overview": analysis_result.get("overview", ""),
             "discussionPoints": analysis_result.get("discussionPoints", []),
+            "problemStatements": analysis_result.get("problemStatements", []),
+            "solutions": analysis_result.get("solutions", []),
+            "workflowSteps": analysis_result.get("workflowSteps", []),
+            "mindMap": analysis_result.get(
+                "mindMap",
+                {
+                    "title": "Meeting Mind Map",
+                    "nodes": [],
+                },
+            ),
+            "summary": analysis_result.get("summary", ""),
             "transcriptText": transcript_text,
             "utterances": utterances,
         }
@@ -557,10 +568,7 @@ def analyze_meeting(transcript_text: str) -> Dict[str, Any]:
     transcript_text = str(transcript_text or "").strip()
 
     if not transcript_text:
-        return {
-            "summary": "",
-            "discussionPoints": [],
-        }
+        return empty_meeting_analysis()
 
     chunks = split_text_into_chunks(transcript_text, max_words=2500)
 
@@ -596,18 +604,57 @@ Analyze this meeting transcript chunk and return ONLY valid JSON.
 
 Required JSON format:
 {{
-  "summary": "Brief summary of this transcript chunk in English only.",
+  "overview": "High-level overview of this meeting chunk in 4 to 6 lines.",
   "discussionPoints": [
     {{
       "id": "point_1",
-      "title": "Short point title in English",
-      "description": "What was discussed about this point in English.",
+      "title": "Short discussion title",
+      "description": "What was discussed about this point.",
       "status": "done"
     }}
-  ]
+  ],
+  "problemStatements": [
+    {{
+      "id": "problem_1",
+      "title": "Short problem or challenge title",
+      "description": "Clear explanation of the problem, blocker, concern, risk, or challenge."
+    }}
+  ],
+  "solutions": [
+    {{
+      "id": "solution_1",
+      "title": "Short solution title",
+      "description": "Solution, recommendation, decision, or proposed approach.",
+      "relatedProblemId": "problem_1"
+    }}
+  ],
+  "workflowSteps": [
+    {{
+      "step": 1,
+      "title": "Step title",
+      "description": "Step-by-step action, process, workflow, or next step."
+    }}
+  ],
+  "mindMap": {{
+    "title": "Meeting Mind Map",
+    "nodes": [
+      {{
+        "id": "node_1",
+        "label": "Main topic",
+        "children": [
+          {{
+            "id": "node_1_1",
+            "label": "Sub topic",
+            "children": []
+          }}
+        ]
+      }}
+    ]
+  }},
+  "summary": "Final summary of this chunk in 5 to 8 lines."
 }}
 
-Status rules:
+Discussion point status rules:
 - Use "done" if the point was completed, approved, fixed, finalized, resolved, or confirmed.
 - Use "pending" if action is required but not completed.
 - Use "not_done" if the meeting clearly says it was not completed.
@@ -617,12 +664,19 @@ Important:
 - Return JSON only.
 - Do not return markdown.
 - Do not use ```json.
-- Output all summary, title, and description in English only.
-- If transcript contains Hindi, Hinglish, or mixed language, translate the meaning into English.
-- Keep titles short.
-- Keep descriptions useful for a business user.
-- Extract every distinct business/action discussion point from this chunk.
-- Do not invent points that are not in the transcript.
+- Output all text in English only.
+- If transcript contains Hindi, Hinglish, Bengali, or mixed language, translate the meaning into English.
+- Do not invent information not available in the transcript.
+- Extract every important business discussion point.
+- Extract problems, blockers, concerns, risks, and challenges separately.
+- Extract solutions, decisions, approaches, and recommendations separately.
+- Extract step-by-step workflow only if the transcript contains process/action flow.
+- If no problem/challenge is discussed, return an empty problemStatements array.
+- If no solution/approach is discussed, return an empty solutions array.
+- If no workflow is discussed, return an empty workflowSteps array.
+- Always return mindMap with title and nodes array.
+- Keep titles short and useful.
+- Keep descriptions business-friendly and clear.
 
 Chunk:
 {chunk_number} of {total_chunks}
@@ -637,10 +691,7 @@ Transcript chunk:
 
 def merge_meeting_analysis(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not chunk_results:
-        return {
-            "summary": "",
-            "discussionPoints": [],
-        }
+        return empty_meeting_analysis()
 
     if len(chunk_results) == 1:
         return chunk_results[0]
@@ -654,15 +705,48 @@ Return ONLY valid JSON.
 
 Required JSON format:
 {{
-  "summary": "Brief final meeting summary in 5 to 8 lines in English.",
+  "overview": "High-level overview of the complete meeting in 4 to 6 lines.",
   "discussionPoints": [
     {{
       "id": "point_1",
-      "title": "Short point title in English",
-      "description": "Useful business description in English.",
+      "title": "Short discussion title",
+      "description": "What was discussed about this point.",
       "status": "pending"
     }}
-  ]
+  ],
+  "problemStatements": [
+    {{
+      "id": "problem_1",
+      "title": "Short problem or challenge title",
+      "description": "Clear explanation of the problem, blocker, concern, risk, or challenge."
+    }}
+  ],
+  "solutions": [
+    {{
+      "id": "solution_1",
+      "title": "Short solution title",
+      "description": "Solution, recommendation, decision, or proposed approach.",
+      "relatedProblemId": "problem_1"
+    }}
+  ],
+  "workflowSteps": [
+    {{
+      "step": 1,
+      "title": "Step title",
+      "description": "Step-by-step action, process, workflow, or next step."
+    }}
+  ],
+  "mindMap": {{
+    "title": "Meeting Mind Map",
+    "nodes": [
+      {{
+        "id": "node_1",
+        "label": "Main topic",
+        "children": []
+      }}
+    ]
+  }},
+  "summary": "Final meeting summary in 5 to 8 lines."
 }}
 
 Rules:
@@ -672,9 +756,14 @@ Rules:
 - Output English only.
 - Merge duplicate points.
 - Do not remove distinct points.
-- Preserve all important decisions, pending tasks, blockers, confirmations, and follow-ups.
-- Re-number ids as point_1, point_2, point_3, etc.
-- Use only these statuses: done, pending, not_done, in_progress.
+- Preserve all important decisions, pending tasks, blockers, confirmations, problems, solutions, and follow-ups.
+- Re-number discussion point ids as point_1, point_2, point_3, etc.
+- Re-number problem ids as problem_1, problem_2, problem_3, etc.
+- Re-number solution ids as solution_1, solution_2, solution_3, etc.
+- Re-number workflow steps from 1.
+- Use only these discussion statuses: done, pending, not_done, in_progress.
+- Create a clean mind map from the final merged meeting topics.
+- Do not invent information outside the given chunk analyses.
 
 Chunk analyses:
 {json.dumps(chunk_results, ensure_ascii=False)}
@@ -683,22 +772,44 @@ Chunk analyses:
     response_text = call_sarvam_chat(prompt)
     merged = safe_json_parse(response_text)
 
-    if merged.get("discussionPoints"):
+    has_content = (
+        merged.get("overview")
+        or merged.get("summary")
+        or merged.get("discussionPoints")
+        or merged.get("problemStatements")
+        or merged.get("solutions")
+        or merged.get("workflowSteps")
+    )
+
+    if has_content:
         return merged
 
     return fallback_merge_analyses(chunk_results)
 
 
 def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    summaries = []
-    points = []
-    seen = set()
+    overview_parts = []
+    summary_parts = []
+    discussion_points = []
+    problem_statements = []
+    solutions = []
+    workflow_steps = []
+    mind_nodes = []
+
+    seen_discussions = set()
+    seen_problems = set()
+    seen_solutions = set()
+    seen_workflows = set()
 
     for result in chunk_results:
+        overview = str(result.get("overview", "") or "").strip()
         summary = str(result.get("summary", "") or "").strip()
 
+        if overview:
+            overview_parts.append(overview)
+
         if summary:
-            summaries.append(summary)
+            summary_parts.append(summary)
 
         for point in result.get("discussionPoints", []):
             if not isinstance(point, dict):
@@ -712,29 +823,374 @@ def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, An
 
             key = f"{title.lower()}::{description.lower()}"
 
-            if key in seen:
+            if key in seen_discussions:
                 continue
 
-            seen.add(key)
+            seen_discussions.add(key)
 
             status = str(point.get("status", "pending") or "pending").lower().strip()
 
             if status not in ["done", "pending", "not_done", "in_progress"]:
                 status = "pending"
 
-            points.append(
+            discussion_points.append(
                 {
-                    "id": f"point_{len(points) + 1}",
-                    "title": title or f"Point {len(points) + 1}",
+                    "id": f"point_{len(discussion_points) + 1}",
+                    "title": title or f"Point {len(discussion_points) + 1}",
                     "description": description,
                     "status": status,
                 }
             )
 
+        for problem in result.get("problemStatements", []):
+            if not isinstance(problem, dict):
+                continue
+
+            title = str(problem.get("title", "") or "").strip()
+            description = str(problem.get("description", "") or "").strip()
+
+            if not title and not description:
+                continue
+
+            key = f"{title.lower()}::{description.lower()}"
+
+            if key in seen_problems:
+                continue
+
+            seen_problems.add(key)
+
+            problem_statements.append(
+                {
+                    "id": f"problem_{len(problem_statements) + 1}",
+                    "title": title or f"Problem {len(problem_statements) + 1}",
+                    "description": description,
+                }
+            )
+
+        for solution in result.get("solutions", []):
+            if not isinstance(solution, dict):
+                continue
+
+            title = str(solution.get("title", "") or "").strip()
+            description = str(solution.get("description", "") or "").strip()
+            related_problem_id = str(solution.get("relatedProblemId", "") or "").strip()
+
+            if not title and not description:
+                continue
+
+            key = f"{title.lower()}::{description.lower()}"
+
+            if key in seen_solutions:
+                continue
+
+            seen_solutions.add(key)
+
+            solutions.append(
+                {
+                    "id": f"solution_{len(solutions) + 1}",
+                    "title": title or f"Solution {len(solutions) + 1}",
+                    "description": description,
+                    "relatedProblemId": related_problem_id,
+                }
+            )
+
+        for workflow in result.get("workflowSteps", []):
+            if not isinstance(workflow, dict):
+                continue
+
+            title = str(workflow.get("title", "") or "").strip()
+            description = str(workflow.get("description", "") or "").strip()
+
+            if not title and not description:
+                continue
+
+            key = f"{title.lower()}::{description.lower()}"
+
+            if key in seen_workflows:
+                continue
+
+            seen_workflows.add(key)
+
+            workflow_steps.append(
+                {
+                    "step": len(workflow_steps) + 1,
+                    "title": title or f"Step {len(workflow_steps) + 1}",
+                    "description": description,
+                }
+            )
+
+        mind_map = result.get("mindMap", {})
+
+        if isinstance(mind_map, dict):
+            nodes = mind_map.get("nodes", [])
+
+            if isinstance(nodes, list):
+                mind_nodes.extend(nodes)
+
     return {
-        "summary": "\n".join(summaries[:8]),
-        "discussionPoints": points,
+        "overview": "\n".join(overview_parts[:6]),
+        "discussionPoints": discussion_points,
+        "problemStatements": problem_statements,
+        "solutions": solutions,
+        "workflowSteps": workflow_steps,
+        "mindMap": {
+            "title": "Meeting Mind Map",
+            "nodes": normalize_mind_map_nodes(mind_nodes),
+        },
+        "summary": "\n".join(summary_parts[:8]),
     }
+
+
+def empty_meeting_analysis() -> Dict[str, Any]:
+    return {
+        "overview": "",
+        "discussionPoints": [],
+        "problemStatements": [],
+        "solutions": [],
+        "workflowSteps": [],
+        "mindMap": {
+            "title": "Meeting Mind Map",
+            "nodes": [],
+        },
+        "summary": "",
+    }
+
+
+def safe_json_parse(text: Any) -> Dict[str, Any]:
+    empty_result = empty_meeting_analysis()
+
+    if text is None:
+        return empty_result
+
+    cleaned = str(text).strip()
+
+    if not cleaned:
+        return empty_result
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.replace("```json", "")
+        cleaned = cleaned.replace("```", "")
+        cleaned = cleaned.strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        fallback = dict(empty_result)
+        fallback["overview"] = cleaned
+        fallback["summary"] = cleaned
+        return fallback
+
+    if not isinstance(data, dict):
+        return empty_result
+
+    discussion_points = normalize_discussion_points(
+        data.get("discussionPoints", [])
+    )
+
+    problem_statements = normalize_text_items(
+        data.get("problemStatements", []),
+        id_prefix="problem",
+    )
+
+    solutions = normalize_solution_items(
+        data.get("solutions", [])
+    )
+
+    workflow_steps = normalize_workflow_steps(
+        data.get("workflowSteps", [])
+    )
+
+    mind_map = normalize_mind_map(
+        data.get("mindMap", {})
+    )
+
+    overview = str(data.get("overview", "") or "").strip()
+    summary = str(data.get("summary", "") or "").strip()
+
+    if not overview and summary:
+        overview = summary
+
+    if not summary and overview:
+        summary = overview
+
+    return {
+        "overview": overview,
+        "discussionPoints": discussion_points,
+        "problemStatements": problem_statements,
+        "solutions": solutions,
+        "workflowSteps": workflow_steps,
+        "mindMap": mind_map,
+        "summary": summary,
+    }
+
+
+def normalize_discussion_points(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_points = []
+
+    for index, point in enumerate(value):
+        if not isinstance(point, dict):
+            continue
+
+        status = str(point.get("status", "pending")).lower().strip()
+
+        if status not in ["done", "pending", "not_done", "in_progress"]:
+            status = "pending"
+
+        title = str(point.get("title") or f"Point {index + 1}").strip()
+        description = str(point.get("description") or "").strip()
+
+        if not title and not description:
+            continue
+
+        normalized_points.append(
+            {
+                "id": str(point.get("id") or f"point_{index + 1}"),
+                "title": title or f"Point {index + 1}",
+                "description": description,
+                "status": status,
+            }
+        )
+
+    return normalized_points
+
+
+def normalize_text_items(value: Any, id_prefix: str) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_items = []
+
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+
+        title = str(item.get("title") or "").strip()
+        description = str(item.get("description") or "").strip()
+
+        if not title and not description:
+            continue
+
+        normalized_items.append(
+            {
+                "id": str(item.get("id") or f"{id_prefix}_{index + 1}"),
+                "title": title or f"{id_prefix.title()} {index + 1}",
+                "description": description,
+            }
+        )
+
+    return normalized_items
+
+
+def normalize_solution_items(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_items = []
+
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+
+        title = str(item.get("title") or "").strip()
+        description = str(item.get("description") or "").strip()
+        related_problem_id = str(item.get("relatedProblemId") or "").strip()
+
+        if not title and not description:
+            continue
+
+        normalized_items.append(
+            {
+                "id": str(item.get("id") or f"solution_{index + 1}"),
+                "title": title or f"Solution {index + 1}",
+                "description": description,
+                "relatedProblemId": related_problem_id,
+            }
+        )
+
+    return normalized_items
+
+
+def normalize_workflow_steps(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_steps = []
+
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+
+        try:
+            step = int(item.get("step") or index + 1)
+        except Exception:
+            step = index + 1
+
+        title = str(item.get("title") or f"Step {step}").strip()
+        description = str(item.get("description") or "").strip()
+
+        if not title and not description:
+            continue
+
+        normalized_steps.append(
+            {
+                "step": step,
+                "title": title or f"Step {step}",
+                "description": description,
+            }
+        )
+
+    normalized_steps.sort(key=lambda item: item.get("step", 0))
+    return normalized_steps
+
+
+def normalize_mind_map(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {
+            "title": "Meeting Mind Map",
+            "nodes": [],
+        }
+
+    title = str(value.get("title") or "Meeting Mind Map").strip()
+    nodes = value.get("nodes", [])
+
+    if not isinstance(nodes, list):
+        nodes = []
+
+    return {
+        "title": title or "Meeting Mind Map",
+        "nodes": normalize_mind_map_nodes(nodes),
+    }
+
+
+def normalize_mind_map_nodes(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_nodes = []
+
+    for index, node in enumerate(value):
+        if not isinstance(node, dict):
+            continue
+
+        label = str(node.get("label") or "").strip()
+
+        if not label:
+            continue
+
+        children = node.get("children", [])
+
+        normalized_nodes.append(
+            {
+                "id": str(node.get("id") or f"node_{index + 1}"),
+                "label": label,
+                "children": normalize_mind_map_nodes(children),
+            }
+        )
+
+    return normalized_nodes
 
 
 def ask_from_transcript(transcript_text: str, question: str) -> str:
@@ -810,66 +1266,6 @@ def call_sarvam_chat(prompt: str) -> str:
         content = ""
 
     return str(content)
-
-
-def safe_json_parse(text: Any) -> Dict[str, Any]:
-    if text is None:
-        return {
-            "summary": "",
-            "discussionPoints": [],
-        }
-
-    cleaned = str(text).strip()
-
-    if not cleaned:
-        return {
-            "summary": "",
-            "discussionPoints": [],
-        }
-
-    if cleaned.startswith("```"):
-        cleaned = cleaned.replace("```json", "")
-        cleaned = cleaned.replace("```", "")
-        cleaned = cleaned.strip()
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return {
-            "summary": cleaned,
-            "discussionPoints": [],
-        }
-
-    summary = data.get("summary", "")
-    points = data.get("discussionPoints", [])
-
-    if not isinstance(points, list):
-        points = []
-
-    normalized_points = []
-
-    for index, point in enumerate(points):
-        if not isinstance(point, dict):
-            continue
-
-        status = str(point.get("status", "pending")).lower().strip()
-
-        if status not in ["done", "pending", "not_done", "in_progress"]:
-            status = "pending"
-
-        normalized_points.append(
-            {
-                "id": str(point.get("id") or f"point_{index + 1}"),
-                "title": str(point.get("title") or f"Point {index + 1}"),
-                "description": str(point.get("description") or ""),
-                "status": status,
-            }
-        )
-
-    return {
-        "summary": str(summary or ""),
-        "discussionPoints": normalized_points,
-    }
 
 
 def split_text_into_chunks(text: str, max_words: int = 2500) -> List[str]:
