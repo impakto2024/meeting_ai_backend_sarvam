@@ -24,6 +24,8 @@ DEFAULT_STT_MODE = os.getenv("DEFAULT_STT_MODE", "transcribe")
 DEFAULT_LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "en-IN")
 DEFAULT_NUM_SPEAKERS = int(os.getenv("DEFAULT_NUM_SPEAKERS", "0"))
 
+SARVAM_CHAT_MAX_TOKENS = int(os.getenv("SARVAM_CHAT_MAX_TOKENS", "4096"))
+
 if not SARVAM_API_KEY:
     raise RuntimeError("SARVAM_API_KEY is missing in environment variables")
 
@@ -168,9 +170,7 @@ async def upload_meeting_chunk(
         os.replace(temp_chunk_path, chunk_path)
 
         uploaded_chunks = [
-            name
-            for name in os.listdir(upload_dir)
-            if name.endswith(".part")
+            name for name in os.listdir(upload_dir) if name.endswith(".part")
         ]
 
         if len(uploaded_chunks) < total_chunks:
@@ -349,6 +349,7 @@ def process_meeting_background(
 
         result = {
             "meetingId": meeting_id,
+            "meetingTitle": analysis_result.get("meetingTitle", ""),
             "overview": analysis_result.get("overview", ""),
             "discussionPoints": analysis_result.get("discussionPoints", []),
             "problemStatements": analysis_result.get("problemStatements", []),
@@ -514,10 +515,8 @@ def normalize_sarvam_transcription(data: Dict[str, Any]) -> Dict[str, Any]:
 
     utterances: List[Dict[str, Any]] = []
 
-    diarized_entries = (
-        data.get("diarized_transcript", {})
-        .get("entries", [])
-    )
+    diarized_transcript = data.get("diarized_transcript") or {}
+    diarized_entries = diarized_transcript.get("entries", [])
 
     if diarized_entries:
         for entry in diarized_entries:
@@ -568,16 +567,17 @@ def analyze_meeting(transcript_text: str) -> Dict[str, Any]:
     transcript_text = str(transcript_text or "").strip()
 
     if not transcript_text:
-        return empty_meeting_analysis()
+        return fallback_analysis_from_transcript("")
 
     chunks = split_text_into_chunks(transcript_text, max_words=2500)
 
     if len(chunks) == 1:
-        return analyze_meeting_chunk(
+        result = analyze_meeting_chunk(
             transcript_text=chunks[0],
             chunk_number=1,
             total_chunks=1,
         )
+        return ensure_minimum_analysis(result, transcript_text)
 
     chunk_results = []
 
@@ -589,7 +589,8 @@ def analyze_meeting(transcript_text: str) -> Dict[str, Any]:
         )
         chunk_results.append(chunk_result)
 
-    return merge_meeting_analysis(chunk_results)
+    merged = merge_meeting_analysis(chunk_results)
+    return ensure_minimum_analysis(merged, transcript_text)
 
 
 def analyze_meeting_chunk(
@@ -598,12 +599,13 @@ def analyze_meeting_chunk(
     total_chunks: int,
 ) -> Dict[str, Any]:
     prompt = f"""
-You are a meeting assistant for a production business app.
+You are a senior meeting analyst for a business productivity app.
 
-Analyze this meeting transcript chunk and return ONLY valid JSON.
+Analyze this meeting transcript chunk and return exactly one valid JSON object.
 
-Required JSON format:
+Required JSON object:
 {{
+  "meetingTitle": "Short meaningful meeting title in 6 to 10 words.",
   "overview": "High-level overview of this meeting chunk in 4 to 6 lines.",
   "discussionPoints": [
     {{
@@ -654,29 +656,30 @@ Required JSON format:
   "summary": "Final summary of this chunk in 5 to 8 lines."
 }}
 
-Discussion point status rules:
+Status rules:
 - Use "done" if the point was completed, approved, fixed, finalized, resolved, or confirmed.
 - Use "pending" if action is required but not completed.
 - Use "not_done" if the meeting clearly says it was not completed.
 - Use "in_progress" if someone is currently working on it.
 
-Important:
-- Return JSON only.
-- Do not return markdown.
-- Do not use ```json.
+Strict rules:
+- Return only one valid JSON object.
+- Do not add explanation before or after JSON.
+- Do not use markdown code fence.
 - Output all text in English only.
 - If transcript contains Hindi, Hinglish, Bengali, or mixed language, translate the meaning into English.
 - Do not invent information not available in the transcript.
 - Extract every important business discussion point.
 - Extract problems, blockers, concerns, risks, and challenges separately.
 - Extract solutions, decisions, approaches, and recommendations separately.
-- Extract step-by-step workflow only if the transcript contains process/action flow.
-- If no problem/challenge is discussed, return an empty problemStatements array.
-- If no solution/approach is discussed, return an empty solutions array.
+- Extract step-by-step workflow only if the transcript contains process or action flow.
+- If no problem or challenge is discussed, return an empty problemStatements array.
+- If no solution or approach is discussed, return an empty solutions array.
 - If no workflow is discussed, return an empty workflowSteps array.
 - Always return mindMap with title and nodes array.
+- Never put a JSON object or JSON string inside overview or summary.
 - Keep titles short and useful.
-- Keep descriptions business-friendly and clear.
+- Keep descriptions business-friendly, factual, and clear.
 
 Chunk:
 {chunk_number} of {total_chunks}
@@ -686,25 +689,46 @@ Transcript chunk:
 """
 
     response_text = call_sarvam_chat(prompt)
-    return safe_json_parse(response_text)
+    parsed = safe_json_parse(response_text)
+
+    if not is_analysis_empty(parsed):
+        return ensure_minimum_analysis(parsed, transcript_text)
+
+    retry_prompt = prompt + """
+
+Your previous response was empty, invalid, or not usable.
+Return exactly one valid JSON object now.
+Do not add any explanation.
+Do not use markdown.
+Make sure overview and summary are normal text, not JSON.
+"""
+
+    retry_response_text = call_sarvam_chat(retry_prompt)
+    retry_parsed = safe_json_parse(retry_response_text)
+
+    if not is_analysis_empty(retry_parsed):
+        return ensure_minimum_analysis(retry_parsed, transcript_text)
+
+    return fallback_analysis_from_transcript(transcript_text)
 
 
 def merge_meeting_analysis(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not chunk_results:
-        return empty_meeting_analysis()
+        return fallback_analysis_from_transcript("")
 
     if len(chunk_results) == 1:
         return chunk_results[0]
 
     prompt = f"""
-You are a meeting assistant.
+You are a senior meeting analyst.
 
 Merge these meeting chunk analyses into one final meeting analysis.
 
-Return ONLY valid JSON.
+Return exactly one valid JSON object.
 
-Required JSON format:
+Required JSON object:
 {{
+  "meetingTitle": "Short meaningful meeting title in 6 to 10 words.",
   "overview": "High-level overview of the complete meeting in 4 to 6 lines.",
   "discussionPoints": [
     {{
@@ -749,20 +773,21 @@ Required JSON format:
   "summary": "Final meeting summary in 5 to 8 lines."
 }}
 
-Rules:
-- Return JSON only.
-- Do not return markdown.
-- Do not use ```json.
+Strict rules:
+- Return only one valid JSON object.
+- Do not add explanation before or after JSON.
+- Do not use markdown code fence.
 - Output English only.
 - Merge duplicate points.
 - Do not remove distinct points.
-- Preserve all important decisions, pending tasks, blockers, confirmations, problems, solutions, and follow-ups.
+- Preserve important decisions, pending tasks, blockers, confirmations, problems, solutions, and follow-ups.
 - Re-number discussion point ids as point_1, point_2, point_3, etc.
 - Re-number problem ids as problem_1, problem_2, problem_3, etc.
 - Re-number solution ids as solution_1, solution_2, solution_3, etc.
 - Re-number workflow steps from 1.
 - Use only these discussion statuses: done, pending, not_done, in_progress.
 - Create a clean mind map from the final merged meeting topics.
+- Never put a JSON object or JSON string inside overview or summary.
 - Do not invent information outside the given chunk analyses.
 
 Chunk analyses:
@@ -772,17 +797,23 @@ Chunk analyses:
     response_text = call_sarvam_chat(prompt)
     merged = safe_json_parse(response_text)
 
-    has_content = (
-        merged.get("overview")
-        or merged.get("summary")
-        or merged.get("discussionPoints")
-        or merged.get("problemStatements")
-        or merged.get("solutions")
-        or merged.get("workflowSteps")
-    )
-
-    if has_content:
+    if not is_analysis_empty(merged):
         return merged
+
+    retry_prompt = prompt + """
+
+Your previous merge response was empty, invalid, or not usable.
+Return exactly one valid JSON object now.
+Do not add any explanation.
+Do not use markdown.
+Make sure overview and summary are normal text, not JSON.
+"""
+
+    retry_response_text = call_sarvam_chat(retry_prompt)
+    retry_merged = safe_json_parse(retry_response_text)
+
+    if not is_analysis_empty(retry_merged):
+        return retry_merged
 
     return fallback_merge_analyses(chunk_results)
 
@@ -805,10 +836,10 @@ def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, An
         overview = str(result.get("overview", "") or "").strip()
         summary = str(result.get("summary", "") or "").strip()
 
-        if overview:
+        if overview and not looks_like_json(overview):
             overview_parts.append(overview)
 
-        if summary:
+        if summary and not looks_like_json(summary):
             summary_parts.append(summary)
 
         for point in result.get("discussionPoints", []):
@@ -927,7 +958,8 @@ def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, An
             if isinstance(nodes, list):
                 mind_nodes.extend(nodes)
 
-    return {
+    merged = {
+        "meetingTitle": generate_title_from_text(" ".join(overview_parts + summary_parts)),
         "overview": "\n".join(overview_parts[:6]),
         "discussionPoints": discussion_points,
         "problemStatements": problem_statements,
@@ -940,9 +972,12 @@ def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, An
         "summary": "\n".join(summary_parts[:8]),
     }
 
+    return ensure_minimum_analysis(merged, " ".join(overview_parts + summary_parts))
+
 
 def empty_meeting_analysis() -> Dict[str, Any]:
     return {
+        "meetingTitle": "",
         "overview": "",
         "discussionPoints": [],
         "problemStatements": [],
@@ -967,45 +1002,44 @@ def safe_json_parse(text: Any) -> Dict[str, Any]:
     if not cleaned:
         return empty_result
 
-    if cleaned.startswith("```"):
-        cleaned = cleaned.replace("```json", "")
-        cleaned = cleaned.replace("```", "")
-        cleaned = cleaned.strip()
+    json_text = extract_json_object(cleaned)
+
+    if not json_text:
+        return empty_result
 
     try:
-        data = json.loads(cleaned)
+        data = json.loads(json_text)
     except json.JSONDecodeError:
-        fallback = dict(empty_result)
-        fallback["overview"] = cleaned
-        fallback["summary"] = cleaned
-        return fallback
+        repaired = repair_common_json_issues(json_text)
+
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError:
+            return empty_result
 
     if not isinstance(data, dict):
         return empty_result
 
-    discussion_points = normalize_discussion_points(
-        data.get("discussionPoints", [])
-    )
+    if isinstance(data.get("result"), dict):
+        data = data["result"]
 
-    problem_statements = normalize_text_items(
-        data.get("problemStatements", []),
-        id_prefix="problem",
-    )
+    if isinstance(data.get("analysis"), dict):
+        data = data["analysis"]
 
-    solutions = normalize_solution_items(
-        data.get("solutions", [])
-    )
+    meeting_title = str(
+        data.get("meetingTitle")
+        or data.get("meeting_title")
+        or ""
+    ).strip()
 
-    workflow_steps = normalize_workflow_steps(
-        data.get("workflowSteps", [])
-    )
+    overview = clean_text_field(data.get("overview", ""))
+    summary = clean_text_field(data.get("summary", ""))
 
-    mind_map = normalize_mind_map(
-        data.get("mindMap", {})
-    )
+    if looks_like_json(overview):
+        overview = ""
 
-    overview = str(data.get("overview", "") or "").strip()
-    summary = str(data.get("summary", "") or "").strip()
+    if looks_like_json(summary):
+        summary = ""
 
     if not overview and summary:
         overview = summary
@@ -1013,7 +1047,43 @@ def safe_json_parse(text: Any) -> Dict[str, Any]:
     if not summary and overview:
         summary = overview
 
+    discussion_points = normalize_discussion_points(
+        data.get("discussionPoints")
+        or data.get("discussion_points")
+        or []
+    )
+
+    problem_statements = normalize_text_items(
+        data.get("problemStatements")
+        or data.get("problem_statements")
+        or data.get("problems")
+        or data.get("challenges")
+        or [],
+        id_prefix="problem",
+    )
+
+    solutions = normalize_solution_items(
+        data.get("solutions")
+        or data.get("solutionStatements")
+        or data.get("solution_statements")
+        or []
+    )
+
+    workflow_steps = normalize_workflow_steps(
+        data.get("workflowSteps")
+        or data.get("workflow_steps")
+        or data.get("steps")
+        or []
+    )
+
+    mind_map = normalize_mind_map(
+        data.get("mindMap")
+        or data.get("mind_map")
+        or {}
+    )
+
     return {
+        "meetingTitle": meeting_title,
         "overview": overview,
         "discussionPoints": discussion_points,
         "problemStatements": problem_statements,
@@ -1024,6 +1094,485 @@ def safe_json_parse(text: Any) -> Dict[str, Any]:
     }
 
 
+def extract_json_object(text: str) -> str:
+    cleaned = str(text or "").strip()
+
+    if not cleaned:
+        return ""
+
+    cleaned = cleaned.replace("```json", "")
+    cleaned = cleaned.replace("```JSON", "")
+    cleaned = cleaned.replace("```", "")
+    cleaned = cleaned.strip()
+
+    for start_index, char in enumerate(cleaned):
+        if char != "{":
+            continue
+
+        candidate = extract_balanced_json_from_index(cleaned, start_index)
+
+        if not candidate:
+            continue
+
+        if (
+            "overview" in candidate
+            or "discussionPoints" in candidate
+            or "discussion_points" in candidate
+            or "summary" in candidate
+            or "mindMap" in candidate
+        ):
+            return candidate.strip()
+
+    first_brace = cleaned.find("{")
+    last_brace = cleaned.rfind("}")
+
+    if first_brace == -1 or last_brace == -1 or last_brace <= first_brace:
+        return ""
+
+    return cleaned[first_brace:last_brace + 1].strip()
+
+
+def extract_balanced_json_from_index(text: str, start_index: int) -> str:
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index in range(start_index, len(text)):
+        char = text[index]
+
+        if escape:
+            escape = False
+            continue
+
+        if char == "\\":
+            escape = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            depth += 1
+
+        elif char == "}":
+            depth -= 1
+
+            if depth == 0:
+                return text[start_index:index + 1]
+
+    return ""
+
+
+def repair_common_json_issues(text: str) -> str:
+    repaired = str(text or "").strip()
+
+    repaired = repaired.replace("\u201c", '"')
+    repaired = repaired.replace("\u201d", '"')
+    repaired = repaired.replace("\u2018", "'")
+    repaired = repaired.replace("\u2019", "'")
+
+    repaired = repaired.replace(",\n}", "\n}")
+    repaired = repaired.replace(",\n]", "\n]")
+    repaired = repaired.replace(",}", "}")
+    repaired = repaired.replace(",]", "]")
+
+    return repaired
+
+
+def clean_text_field(value: Any) -> str:
+    cleaned = str(value or "").strip()
+
+    if not cleaned:
+        return ""
+
+    cleaned = cleaned.replace("```json", "")
+    cleaned = cleaned.replace("```JSON", "")
+    cleaned = cleaned.replace("```", "")
+    cleaned = cleaned.strip()
+
+    return cleaned
+
+
+def looks_like_json(value: str) -> bool:
+    cleaned = str(value or "").strip()
+
+    if not cleaned:
+        return False
+
+    return (
+        cleaned.startswith("{")
+        or cleaned.startswith("[")
+        or '"overview"' in cleaned
+        or '"discussionPoints"' in cleaned
+        or '"discussion_points"' in cleaned
+        or '"problemStatements"' in cleaned
+        or '"workflowSteps"' in cleaned
+        or '"mindMap"' in cleaned
+        or '"summary"' in cleaned
+    )
+
+
+def is_analysis_empty(result: Dict[str, Any]) -> bool:
+    if not isinstance(result, dict):
+        return True
+
+    mind_map = result.get("mindMap", {})
+
+    mind_nodes = []
+    if isinstance(mind_map, dict):
+        nodes = mind_map.get("nodes", [])
+        if isinstance(nodes, list):
+            mind_nodes = nodes
+
+    return not any(
+        [
+            str(result.get("overview", "") or "").strip(),
+            str(result.get("summary", "") or "").strip(),
+            result.get("discussionPoints", []),
+            result.get("problemStatements", []),
+            result.get("solutions", []),
+            result.get("workflowSteps", []),
+            mind_nodes,
+        ]
+    )
+
+
+def ensure_minimum_analysis(
+    result: Dict[str, Any],
+    transcript_text: str,
+) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        result = empty_meeting_analysis()
+
+    transcript_text = str(transcript_text or "").strip()
+
+    meeting_title = str(result.get("meetingTitle", "") or "").strip()
+    overview = clean_text_field(result.get("overview", ""))
+    summary = clean_text_field(result.get("summary", ""))
+
+    if looks_like_json(overview):
+        overview = ""
+
+    if looks_like_json(summary):
+        summary = ""
+
+    discussion_points = normalize_discussion_points(
+        result.get("discussionPoints", [])
+    )
+
+    problem_statements = normalize_text_items(
+        result.get("problemStatements", []),
+        id_prefix="problem",
+    )
+
+    solutions = normalize_solution_items(
+        result.get("solutions", [])
+    )
+
+    workflow_steps = normalize_workflow_steps(
+        result.get("workflowSteps", [])
+    )
+
+    mind_map = normalize_mind_map(
+        result.get("mindMap", {})
+    )
+
+    if not meeting_title:
+        meeting_title = generate_title_from_text(
+            overview or summary or transcript_text
+        )
+
+    if not overview:
+        overview = generate_overview_fallback(transcript_text, summary)
+
+    if not summary:
+        summary = generate_summary_fallback(transcript_text, overview)
+
+    if not discussion_points:
+        discussion_points = [
+            {
+                "id": "point_1",
+                "title": "Captured Meeting Discussion",
+                "description": generate_discussion_fallback(transcript_text, overview, summary),
+                "status": "pending",
+            }
+        ]
+
+    if not has_mind_map_nodes(mind_map):
+        mind_map = build_mind_map_from_analysis(
+            discussion_points=discussion_points,
+            problem_statements=problem_statements,
+            solutions=solutions,
+            workflow_steps=workflow_steps,
+        )
+
+    return {
+        "meetingTitle": meeting_title,
+        "overview": overview,
+        "discussionPoints": discussion_points,
+        "problemStatements": problem_statements,
+        "solutions": solutions,
+        "workflowSteps": workflow_steps,
+        "mindMap": mind_map,
+        "summary": summary,
+    }
+
+
+def fallback_analysis_from_transcript(transcript_text: str) -> Dict[str, Any]:
+    transcript_text = str(transcript_text or "").strip()
+
+    if not transcript_text:
+        return {
+            "meetingTitle": "Meeting Audio Analysis",
+            "overview": "No clear speech transcript could be generated from this audio. Please check the recording quality and try again.",
+            "discussionPoints": [
+                {
+                    "id": "point_1",
+                    "title": "Audio Could Not Be Clearly Analyzed",
+                    "description": "The system could not generate a reliable transcript from the uploaded meeting audio.",
+                    "status": "pending",
+                }
+            ],
+            "problemStatements": [],
+            "solutions": [],
+            "workflowSteps": [],
+            "mindMap": {
+                "title": "Meeting Mind Map",
+                "nodes": [
+                    {
+                        "id": "node_1",
+                        "label": "Audio analysis unavailable",
+                        "children": [],
+                    }
+                ],
+            },
+            "summary": "No reliable meeting summary could be generated because the transcript was empty or unclear.",
+        }
+
+    title = generate_title_from_text(transcript_text)
+    excerpt = make_excerpt(transcript_text, max_chars=700)
+
+    return {
+        "meetingTitle": title,
+        "overview": (
+            "The meeting audio was transcribed successfully. "
+            "A complete structured analysis could not be generated with high confidence, "
+            "so this overview is based directly on the transcript excerpt: "
+            f"{excerpt}"
+        ),
+        "discussionPoints": [
+            {
+                "id": "point_1",
+                "title": "Main Meeting Discussion",
+                "description": excerpt,
+                "status": "pending",
+            }
+        ],
+        "problemStatements": [],
+        "solutions": [],
+        "workflowSteps": [],
+        "mindMap": {
+            "title": "Meeting Mind Map",
+            "nodes": [
+                {
+                    "id": "node_1",
+                    "label": "Main Meeting Discussion",
+                    "children": [],
+                }
+            ],
+        },
+        "summary": (
+            "The transcript was captured, but the AI analysis response was not reliable enough "
+            "to extract every section. Please review the transcript for exact details."
+        ),
+    }
+
+
+def generate_title_from_text(text: str) -> str:
+    cleaned = str(text or "").strip()
+
+    if not cleaned:
+        return "Meeting Notes"
+
+    cleaned = " ".join(cleaned.split())
+    first_sentence = cleaned.split(".")[0].strip()
+
+    if not first_sentence:
+        first_sentence = cleaned
+
+    first_sentence = first_sentence.replace("Speaker:", "").strip()
+
+    words = first_sentence.split()
+
+    if len(words) >= 4:
+        title = " ".join(words[:9])
+    else:
+        title = " ".join(words)
+
+    title = title.strip(" ,:-")
+
+    if not title:
+        return "Meeting Notes"
+
+    if len(title) > 70:
+        title = title[:67].strip() + "..."
+
+    return title
+
+
+def generate_overview_fallback(transcript_text: str, summary: str) -> str:
+    if summary and not looks_like_json(summary):
+        return summary
+
+    transcript_text = str(transcript_text or "").strip()
+
+    if transcript_text:
+        return (
+            "The meeting transcript was captured successfully. "
+            f"Key transcript excerpt: {make_excerpt(transcript_text, max_chars=600)}"
+        )
+
+    return "No clear overview could be generated from this meeting audio."
+
+
+def generate_summary_fallback(transcript_text: str, overview: str) -> str:
+    if overview and not looks_like_json(overview):
+        return overview
+
+    transcript_text = str(transcript_text or "").strip()
+
+    if transcript_text:
+        return (
+            "The meeting was transcribed, but a detailed structured summary could not be generated. "
+            f"Transcript excerpt: {make_excerpt(transcript_text, max_chars=600)}"
+        )
+
+    return "No clear summary could be generated from this meeting audio."
+
+
+def generate_discussion_fallback(
+    transcript_text: str,
+    overview: str,
+    summary: str,
+) -> str:
+    for value in [overview, summary, transcript_text]:
+        cleaned = str(value or "").strip()
+
+        if cleaned and not looks_like_json(cleaned):
+            return make_excerpt(cleaned, max_chars=600)
+
+    return "The meeting was processed, but no clear discussion points were extracted."
+
+
+def make_excerpt(text: str, max_chars: int = 600) -> str:
+    cleaned = " ".join(str(text or "").split())
+
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    return cleaned[:max_chars].rsplit(" ", 1)[0].strip() + "..."
+
+
+def has_mind_map_nodes(mind_map: Dict[str, Any]) -> bool:
+    if not isinstance(mind_map, dict):
+        return False
+
+    nodes = mind_map.get("nodes", [])
+
+    return isinstance(nodes, list) and len(nodes) > 0
+
+
+def build_mind_map_from_analysis(
+    discussion_points: List[Dict[str, Any]],
+    problem_statements: List[Dict[str, Any]],
+    solutions: List[Dict[str, Any]],
+    workflow_steps: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    nodes = []
+
+    if discussion_points:
+        nodes.append(
+            {
+                "id": "node_discussions",
+                "label": "Discussion Points",
+                "children": [
+                    {
+                        "id": f"node_discussion_{index + 1}",
+                        "label": str(item.get("title") or f"Point {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(discussion_points[:6])
+                ],
+            }
+        )
+
+    if problem_statements:
+        nodes.append(
+            {
+                "id": "node_problems",
+                "label": "Problems & Challenges",
+                "children": [
+                    {
+                        "id": f"node_problem_{index + 1}",
+                        "label": str(item.get("title") or f"Problem {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(problem_statements[:6])
+                ],
+            }
+        )
+
+    if solutions:
+        nodes.append(
+            {
+                "id": "node_solutions",
+                "label": "Solutions & Approach",
+                "children": [
+                    {
+                        "id": f"node_solution_{index + 1}",
+                        "label": str(item.get("title") or f"Solution {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(solutions[:6])
+                ],
+            }
+        )
+
+    if workflow_steps:
+        nodes.append(
+            {
+                "id": "node_workflow",
+                "label": "Workflow Steps",
+                "children": [
+                    {
+                        "id": f"node_workflow_{index + 1}",
+                        "label": str(item.get("title") or f"Step {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(workflow_steps[:6])
+                ],
+            }
+        )
+
+    if not nodes:
+        nodes = [
+            {
+                "id": "node_1",
+                "label": "Meeting Discussion",
+                "children": [],
+            }
+        ]
+
+    return {
+        "title": "Meeting Mind Map",
+        "nodes": nodes,
+    }
+
+
 def normalize_discussion_points(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -1031,6 +1580,22 @@ def normalize_discussion_points(value: Any) -> List[Dict[str, Any]]:
     normalized_points = []
 
     for index, point in enumerate(value):
+        if isinstance(point, str):
+            text = point.strip()
+
+            if not text:
+                continue
+
+            normalized_points.append(
+                {
+                    "id": f"point_{index + 1}",
+                    "title": f"Point {index + 1}",
+                    "description": text,
+                    "status": "pending",
+                }
+            )
+            continue
+
         if not isinstance(point, dict):
             continue
 
@@ -1064,6 +1629,21 @@ def normalize_text_items(value: Any, id_prefix: str) -> List[Dict[str, Any]]:
     normalized_items = []
 
     for index, item in enumerate(value):
+        if isinstance(item, str):
+            text = item.strip()
+
+            if not text:
+                continue
+
+            normalized_items.append(
+                {
+                    "id": f"{id_prefix}_{index + 1}",
+                    "title": f"{id_prefix.title()} {index + 1}",
+                    "description": text,
+                }
+            )
+            continue
+
         if not isinstance(item, dict):
             continue
 
@@ -1091,6 +1671,22 @@ def normalize_solution_items(value: Any) -> List[Dict[str, Any]]:
     normalized_items = []
 
     for index, item in enumerate(value):
+        if isinstance(item, str):
+            text = item.strip()
+
+            if not text:
+                continue
+
+            normalized_items.append(
+                {
+                    "id": f"solution_{index + 1}",
+                    "title": f"Solution {index + 1}",
+                    "description": text,
+                    "relatedProblemId": "",
+                }
+            )
+            continue
+
         if not isinstance(item, dict):
             continue
 
@@ -1120,6 +1716,21 @@ def normalize_workflow_steps(value: Any) -> List[Dict[str, Any]]:
     normalized_steps = []
 
     for index, item in enumerate(value):
+        if isinstance(item, str):
+            text = item.strip()
+
+            if not text:
+                continue
+
+            normalized_steps.append(
+                {
+                    "step": index + 1,
+                    "title": f"Step {index + 1}",
+                    "description": text,
+                }
+            )
+            continue
+
         if not isinstance(item, dict):
             continue
 
@@ -1172,6 +1783,21 @@ def normalize_mind_map_nodes(value: Any) -> List[Dict[str, Any]]:
     normalized_nodes = []
 
     for index, node in enumerate(value):
+        if isinstance(node, str):
+            label = node.strip()
+
+            if not label:
+                continue
+
+            normalized_nodes.append(
+                {
+                    "id": f"node_{index + 1}",
+                    "label": label,
+                    "children": [],
+                }
+            )
+            continue
+
         if not isinstance(node, dict):
             continue
 
@@ -1236,8 +1862,8 @@ def call_sarvam_chat(prompt: str) -> str:
                 "content": prompt,
             }
         ],
-        "temperature": 0.2,
-        "max_tokens": 4096,
+        "temperature": 0,
+        "max_tokens": SARVAM_CHAT_MAX_TOKENS,
     }
 
     response = requests.post(
