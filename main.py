@@ -20,9 +20,33 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SARVAM_CHAT_MODEL = os.getenv("SARVAM_CHAT_MODEL", "sarvam-105b")
 SARVAM_STT_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
 
-DEFAULT_STT_MODE = os.getenv("DEFAULT_STT_MODE", "transcribe")
-DEFAULT_LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "en-IN")
+# English-only Meeting AI settings
+FORCE_ENGLISH_ONLY = os.getenv("FORCE_ENGLISH_ONLY", "true").lower() == "true"
+
+# Use translate mode so Hindi/Bengali/Indic speech becomes English text.
+DEFAULT_STT_MODE = os.getenv("DEFAULT_STT_MODE", "translate")
+
+# Use unknown because meeting audio may contain Hindi, Bengali, English, or mixed language.
+DEFAULT_LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "unknown")
+
 DEFAULT_NUM_SPEAKERS = int(os.getenv("DEFAULT_NUM_SPEAKERS", "0"))
+
+ENGLISH_ONLY_RULE = """
+LANGUAGE RULE:
+Output only English.
+
+If the input contains Hindi, Bengali, Hinglish, Banglish, or any other language,
+translate the meaning into clear natural English.
+
+Do not output Hindi text.
+Do not output Bengali text.
+Do not output Devanagari script.
+Do not output Bengali script.
+Do not output mixed-language text.
+
+Keep names, brand names, article codes, product codes, numbers, dates, prices,
+amounts, and technical terms unchanged.
+"""
 
 SARVAM_CHAT_MAX_TOKENS = int(os.getenv("SARVAM_CHAT_MAX_TOKENS", "4096"))
 
@@ -265,8 +289,13 @@ def start_processing_job(
 ) -> Dict[str, Any]:
     job_id = str(uuid.uuid4())
 
-    validated_stt_mode = validate_stt_mode(stt_mode)
-    validated_language_code = validate_language_code(language_code)
+    if FORCE_ENGLISH_ONLY:
+        validated_stt_mode = "translate"
+        validated_language_code = "unknown"
+    else:
+        validated_stt_mode = validate_stt_mode(stt_mode)
+        validated_language_code = validate_language_code(language_code)
+
     validated_num_speakers = validate_num_speakers(num_speakers)
 
     with jobs_lock:
@@ -1827,8 +1856,12 @@ If the answer is not available in the transcript, say:
 "I could not find this information in the meeting transcript."
 
 Rules:
-- Always answer in English only.
-- Do not answer in Hindi unless the user explicitly asks for Hindi.
+- Answer only in English.
+- If the question is in Hindi, Bengali, Hinglish, or mixed language, understand it and answer in English.
+- If the transcript contains Hindi, Bengali, Hinglish, or mixed language, translate the meaning and answer in English.
+- Do not use Hindi script.
+- Do not use Bengali script.
+- Do not use mixed-language text.
 - Keep the answer direct and useful.
 
 Transcript:
@@ -1854,18 +1887,19 @@ def call_sarvam_chat(prompt: str) -> str:
         "api-subscription-key": SARVAM_API_KEY,
     }
 
+    final_prompt = f"{ENGLISH_ONLY_RULE}\n\n{prompt}" if FORCE_ENGLISH_ONLY else prompt
+
     payload = {
         "model": SARVAM_CHAT_MODEL,
         "messages": [
             {
                 "role": "user",
-                "content": prompt,
+                "content": final_prompt,
             }
         ],
-        "temperature": 0,
-        "max_tokens": SARVAM_CHAT_MAX_TOKENS,
+        "temperature": 0.2,
+        "max_tokens": 4096,
     }
-
     response = requests.post(
         url,
         headers=headers,
