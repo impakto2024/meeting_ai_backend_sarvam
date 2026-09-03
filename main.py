@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -371,18 +372,38 @@ def process_meeting_background(
         update_job(
             job_id,
             status="analyzing",
-            message="Creating meeting analysis",
+            message="Creating premium meeting intelligence",
         )
 
         analysis_result = analyze_meeting(transcript_text)
+        generated_at = current_utc_iso()
+
+        meeting_title = str(analysis_result.get("meetingTitle", "") or "").strip()
+        if not meeting_title:
+            meeting_title = generate_title_from_text(
+                analysis_result.get("overview", "")
+                or analysis_result.get("summary", "")
+                or transcript_text
+            )
 
         result = {
             "meetingId": meeting_id,
-            "meetingTitle": analysis_result.get("meetingTitle", ""),
+            "meetingTitle": meeting_title,
+            "generatedAt": generated_at,
+            "suggestedAudioFileName": build_suggested_audio_file_name(
+                title=meeting_title,
+                generated_at=generated_at,
+                audio_path=audio_path,
+            ),
             "overview": analysis_result.get("overview", ""),
+            "topics": analysis_result.get("topics", []),
             "discussionPoints": analysis_result.get("discussionPoints", []),
+            "decisions": analysis_result.get("decisions", []),
+            "actionItems": analysis_result.get("actionItems", []),
             "problemStatements": analysis_result.get("problemStatements", []),
             "solutions": analysis_result.get("solutions", []),
+            "risks": analysis_result.get("risks", []),
+            "followUps": analysis_result.get("followUps", []),
             "workflowSteps": analysis_result.get("workflowSteps", []),
             "mindMap": analysis_result.get(
                 "mindMap",
@@ -434,6 +455,57 @@ def update_job(
 
         if error is not None:
             jobs[job_id]["error"] = error
+
+
+def current_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def build_suggested_audio_file_name(
+    title: str,
+    generated_at: str,
+    audio_path: str,
+) -> str:
+    extension = os.path.splitext(str(audio_path or ""))[1].lower().strip()
+
+    if extension not in [".m4a", ".mp4", ".aac", ".wav", ".mp3"]:
+        extension = ".m4a"
+
+    title_part = sanitize_file_name(title or "Meeting Notes")
+
+    if not title_part:
+        title_part = "Meeting Notes"
+
+    try:
+        date_part = datetime.fromisoformat(generated_at).strftime("%Y%m%d_%H%M")
+    except Exception:
+        date_part = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+
+    return f"{date_part}_{title_part}{extension}"
+
+
+def sanitize_file_name(value: str, max_length: int = 70) -> str:
+    cleaned = " ".join(str(value or "").strip().split())
+
+    if not cleaned:
+        return ""
+
+    allowed_chars = []
+
+    for char in cleaned:
+        if char.isalnum() or char in [" ", "-", "_"]:
+            allowed_chars.append(char)
+        else:
+            allowed_chars.append(" ")
+
+    cleaned = " ".join("".join(allowed_chars).split())
+    cleaned = cleaned.replace(" ", "_")
+    cleaned = cleaned.strip("_-")
+
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].strip("_-")
+
+    return cleaned
 
 
 def validate_stt_mode(value: str) -> str:
@@ -628,20 +700,49 @@ def analyze_meeting_chunk(
     total_chunks: int,
 ) -> Dict[str, Any]:
     prompt = f"""
-You are a senior meeting analyst for a business productivity app.
+{ENGLISH_ONLY_RULE}
+
+You are a senior meeting intelligence analyst for a premium business productivity app.
+
+Your job is to produce output that feels like a professional meeting analyst wrote it,
+not like a basic AI summarizer.
 
 Analyze this meeting transcript chunk and return exactly one valid JSON object.
 
 Required JSON object:
 {{
-  "meetingTitle": "Short meaningful meeting title in 6 to 10 words.",
-  "overview": "High-level overview of this meeting chunk in 4 to 6 lines.",
+  "meetingTitle": "Short meaningful meeting title in 5 to 8 words. Do not include date or time.",
+  "overview": "Executive overview of this meeting chunk in 4 to 6 strong business lines.",
+  "topics": [
+    {{
+      "id": "topic_1",
+      "title": "Main topic title",
+      "description": "What was discussed under this topic."
+    }}
+  ],
   "discussionPoints": [
     {{
       "id": "point_1",
       "title": "Short discussion title",
-      "description": "What was discussed about this point.",
+      "description": "Detailed, useful business explanation of what was discussed.",
       "status": "done"
+    }}
+  ],
+  "decisions": [
+    {{
+      "id": "decision_1",
+      "title": "Decision title",
+      "description": "Decision details, if a decision was made or confirmed."
+    }}
+  ],
+  "actionItems": [
+    {{
+      "id": "action_1",
+      "title": "Action item title",
+      "description": "What needs to be done.",
+      "owner": "Owner if mentioned, otherwise Not specified",
+      "deadline": "Deadline if mentioned, otherwise Not specified",
+      "status": "pending"
     }}
   ],
   "problemStatements": [
@@ -657,6 +758,20 @@ Required JSON object:
       "title": "Short solution title",
       "description": "Solution, recommendation, decision, or proposed approach.",
       "relatedProblemId": "problem_1"
+    }}
+  ],
+  "risks": [
+    {{
+      "id": "risk_1",
+      "title": "Risk or concern title",
+      "description": "Risk, concern, dependency, objection, or uncertainty discussed."
+    }}
+  ],
+  "followUps": [
+    {{
+      "id": "followup_1",
+      "title": "Follow-up title",
+      "description": "Follow-up, next discussion, review, approval, or confirmation needed."
     }}
   ],
   "workflowSteps": [
@@ -682,11 +797,11 @@ Required JSON object:
       }}
     ]
   }},
-  "summary": "Final summary of this chunk in 5 to 8 lines."
+  "summary": "Final summary of this chunk in 6 to 10 lines."
 }}
 
 Status rules:
-- Use "done" if the point was completed, approved, fixed, finalized, resolved, or confirmed.
+- Use "done" if the point/action was completed, approved, fixed, finalized, resolved, or confirmed.
 - Use "pending" if action is required but not completed.
 - Use "not_done" if the meeting clearly says it was not completed.
 - Use "in_progress" if someone is currently working on it.
@@ -696,15 +811,19 @@ Strict rules:
 - Do not add explanation before or after JSON.
 - Do not use markdown code fence.
 - Output all text in English only.
-- If transcript contains Hindi, Hinglish, Bengali, or mixed language, translate the meaning into English.
+- If transcript contains Hindi, Hinglish, Bengali, Banglish, or mixed language, translate the meaning into English.
 - Do not invent information not available in the transcript.
+- Preserve names, brand names, article codes, product codes, numbers, dates, prices, commitments, and deadlines.
+- Generate a useful meetingTitle from the actual topic. Do not use generic titles like "Meeting Summary" unless no topic is clear.
+- Extract topic-wise intelligence, not only generic summary.
 - Extract every important business discussion point.
-- Extract problems, blockers, concerns, risks, and challenges separately.
+- Extract decisions separately from discussion points.
+- Extract action items separately with owner/deadline if available.
+- Extract problems, blockers, objections, risks, and challenges separately.
 - Extract solutions, decisions, approaches, and recommendations separately.
+- Extract follow-ups separately.
 - Extract step-by-step workflow only if the transcript contains process or action flow.
-- If no problem or challenge is discussed, return an empty problemStatements array.
-- If no solution or approach is discussed, return an empty solutions array.
-- If no workflow is discussed, return an empty workflowSteps array.
+- If a section is not present in the transcript, return an empty array for that section.
 - Always return mindMap with title and nodes array.
 - Never put a JSON object or JSON string inside overview or summary.
 - Keep titles short and useful.
@@ -746,24 +865,50 @@ def merge_meeting_analysis(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any
         return fallback_analysis_from_transcript("")
 
     if len(chunk_results) == 1:
-        return chunk_results[0]
+        return ensure_minimum_analysis(chunk_results[0], "")
 
     prompt = f"""
-You are a senior meeting analyst.
+{ENGLISH_ONLY_RULE}
 
-Merge these meeting chunk analyses into one final meeting analysis.
+You are a senior meeting intelligence analyst.
+
+Merge these meeting chunk analyses into one final premium meeting note.
 
 Return exactly one valid JSON object.
 
 Required JSON object:
 {{
-  "meetingTitle": "Short meaningful meeting title in 6 to 10 words.",
-  "overview": "High-level overview of the complete meeting in 4 to 6 lines.",
+  "meetingTitle": "Short meaningful meeting title in 5 to 8 words. Do not include date or time.",
+  "overview": "Executive overview of the complete meeting in 4 to 6 strong business lines.",
+  "topics": [
+    {{
+      "id": "topic_1",
+      "title": "Main topic title",
+      "description": "What was discussed under this topic."
+    }}
+  ],
   "discussionPoints": [
     {{
       "id": "point_1",
       "title": "Short discussion title",
-      "description": "What was discussed about this point.",
+      "description": "Detailed useful business explanation.",
+      "status": "pending"
+    }}
+  ],
+  "decisions": [
+    {{
+      "id": "decision_1",
+      "title": "Decision title",
+      "description": "Decision details."
+    }}
+  ],
+  "actionItems": [
+    {{
+      "id": "action_1",
+      "title": "Action item title",
+      "description": "What needs to be done.",
+      "owner": "Owner if mentioned, otherwise Not specified",
+      "deadline": "Deadline if mentioned, otherwise Not specified",
       "status": "pending"
     }}
   ],
@@ -771,22 +916,36 @@ Required JSON object:
     {{
       "id": "problem_1",
       "title": "Short problem or challenge title",
-      "description": "Clear explanation of the problem, blocker, concern, risk, or challenge."
+      "description": "Problem details."
     }}
   ],
   "solutions": [
     {{
       "id": "solution_1",
       "title": "Short solution title",
-      "description": "Solution, recommendation, decision, or proposed approach.",
+      "description": "Solution details.",
       "relatedProblemId": "problem_1"
+    }}
+  ],
+  "risks": [
+    {{
+      "id": "risk_1",
+      "title": "Risk or concern title",
+      "description": "Risk details."
+    }}
+  ],
+  "followUps": [
+    {{
+      "id": "followup_1",
+      "title": "Follow-up title",
+      "description": "Follow-up details."
     }}
   ],
   "workflowSteps": [
     {{
       "step": 1,
       "title": "Step title",
-      "description": "Step-by-step action, process, workflow, or next step."
+      "description": "Step details."
     }}
   ],
   "mindMap": {{
@@ -799,7 +958,7 @@ Required JSON object:
       }}
     ]
   }},
-  "summary": "Final meeting summary in 5 to 8 lines."
+  "summary": "Final meeting summary in 6 to 10 lines."
 }}
 
 Strict rules:
@@ -807,17 +966,23 @@ Strict rules:
 - Do not add explanation before or after JSON.
 - Do not use markdown code fence.
 - Output English only.
+- Generate a clean meetingTitle from the complete meeting topic.
+- Do not use generic titles like "Meeting Summary" unless no topic is clear.
 - Merge duplicate points.
 - Do not remove distinct points.
-- Preserve important decisions, pending tasks, blockers, confirmations, problems, solutions, and follow-ups.
+- Preserve important decisions, pending tasks, blockers, confirmations, problems, solutions, risks, and follow-ups.
+- Re-number topic ids as topic_1, topic_2, topic_3, etc.
 - Re-number discussion point ids as point_1, point_2, point_3, etc.
+- Re-number decision ids as decision_1, decision_2, decision_3, etc.
+- Re-number action item ids as action_1, action_2, action_3, etc.
 - Re-number problem ids as problem_1, problem_2, problem_3, etc.
 - Re-number solution ids as solution_1, solution_2, solution_3, etc.
 - Re-number workflow steps from 1.
-- Use only these discussion statuses: done, pending, not_done, in_progress.
+- Use only these statuses: done, pending, not_done, in_progress.
 - Create a clean mind map from the final merged meeting topics.
 - Never put a JSON object or JSON string inside overview or summary.
 - Do not invent information outside the given chunk analyses.
+- Make the final output polished, useful, and boardroom-ready.
 
 Chunk analyses:
 {json.dumps(chunk_results, ensure_ascii=False)}
@@ -827,7 +992,7 @@ Chunk analyses:
     merged = safe_json_parse(response_text)
 
     if not is_analysis_empty(merged):
-        return merged
+        return ensure_minimum_analysis(merged, json.dumps(chunk_results, ensure_ascii=False))
 
     retry_prompt = prompt + """
 
@@ -842,7 +1007,7 @@ Make sure overview and summary are normal text, not JSON.
     retry_merged = safe_json_parse(retry_response_text)
 
     if not is_analysis_empty(retry_merged):
-        return retry_merged
+        return ensure_minimum_analysis(retry_merged, json.dumps(chunk_results, ensure_ascii=False))
 
     return fallback_merge_analyses(chunk_results)
 
@@ -850,20 +1015,23 @@ Make sure overview and summary are normal text, not JSON.
 def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any]:
     overview_parts = []
     summary_parts = []
+
+    topics = []
     discussion_points = []
+    decisions = []
+    action_items = []
     problem_statements = []
     solutions = []
+    risks = []
+    follow_ups = []
     workflow_steps = []
     mind_nodes = []
 
-    seen_discussions = set()
-    seen_problems = set()
-    seen_solutions = set()
-    seen_workflows = set()
-
     for result in chunk_results:
-        overview = str(result.get("overview", "") or "").strip()
-        summary = str(result.get("summary", "") or "").strip()
+        normalized = ensure_minimum_analysis(result, "")
+
+        overview = str(normalized.get("overview", "") or "").strip()
+        summary = str(normalized.get("summary", "") or "").strip()
 
         if overview and not looks_like_json(overview):
             overview_parts.append(overview)
@@ -871,115 +1039,17 @@ def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, An
         if summary and not looks_like_json(summary):
             summary_parts.append(summary)
 
-        for point in result.get("discussionPoints", []):
-            if not isinstance(point, dict):
-                continue
+        topics.extend(normalized.get("topics", []))
+        discussion_points.extend(normalized.get("discussionPoints", []))
+        decisions.extend(normalized.get("decisions", []))
+        action_items.extend(normalized.get("actionItems", []))
+        problem_statements.extend(normalized.get("problemStatements", []))
+        solutions.extend(normalized.get("solutions", []))
+        risks.extend(normalized.get("risks", []))
+        follow_ups.extend(normalized.get("followUps", []))
+        workflow_steps.extend(normalized.get("workflowSteps", []))
 
-            title = str(point.get("title", "") or "").strip()
-            description = str(point.get("description", "") or "").strip()
-
-            if not title and not description:
-                continue
-
-            key = f"{title.lower()}::{description.lower()}"
-
-            if key in seen_discussions:
-                continue
-
-            seen_discussions.add(key)
-
-            status = str(point.get("status", "pending") or "pending").lower().strip()
-
-            if status not in ["done", "pending", "not_done", "in_progress"]:
-                status = "pending"
-
-            discussion_points.append(
-                {
-                    "id": f"point_{len(discussion_points) + 1}",
-                    "title": title or f"Point {len(discussion_points) + 1}",
-                    "description": description,
-                    "status": status,
-                }
-            )
-
-        for problem in result.get("problemStatements", []):
-            if not isinstance(problem, dict):
-                continue
-
-            title = str(problem.get("title", "") or "").strip()
-            description = str(problem.get("description", "") or "").strip()
-
-            if not title and not description:
-                continue
-
-            key = f"{title.lower()}::{description.lower()}"
-
-            if key in seen_problems:
-                continue
-
-            seen_problems.add(key)
-
-            problem_statements.append(
-                {
-                    "id": f"problem_{len(problem_statements) + 1}",
-                    "title": title or f"Problem {len(problem_statements) + 1}",
-                    "description": description,
-                }
-            )
-
-        for solution in result.get("solutions", []):
-            if not isinstance(solution, dict):
-                continue
-
-            title = str(solution.get("title", "") or "").strip()
-            description = str(solution.get("description", "") or "").strip()
-            related_problem_id = str(solution.get("relatedProblemId", "") or "").strip()
-
-            if not title and not description:
-                continue
-
-            key = f"{title.lower()}::{description.lower()}"
-
-            if key in seen_solutions:
-                continue
-
-            seen_solutions.add(key)
-
-            solutions.append(
-                {
-                    "id": f"solution_{len(solutions) + 1}",
-                    "title": title or f"Solution {len(solutions) + 1}",
-                    "description": description,
-                    "relatedProblemId": related_problem_id,
-                }
-            )
-
-        for workflow in result.get("workflowSteps", []):
-            if not isinstance(workflow, dict):
-                continue
-
-            title = str(workflow.get("title", "") or "").strip()
-            description = str(workflow.get("description", "") or "").strip()
-
-            if not title and not description:
-                continue
-
-            key = f"{title.lower()}::{description.lower()}"
-
-            if key in seen_workflows:
-                continue
-
-            seen_workflows.add(key)
-
-            workflow_steps.append(
-                {
-                    "step": len(workflow_steps) + 1,
-                    "title": title or f"Step {len(workflow_steps) + 1}",
-                    "description": description,
-                }
-            )
-
-        mind_map = result.get("mindMap", {})
+        mind_map = normalized.get("mindMap", {})
 
         if isinstance(mind_map, dict):
             nodes = mind_map.get("nodes", [])
@@ -990,10 +1060,15 @@ def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, An
     merged = {
         "meetingTitle": generate_title_from_text(" ".join(overview_parts + summary_parts)),
         "overview": "\n".join(overview_parts[:6]),
-        "discussionPoints": discussion_points,
-        "problemStatements": problem_statements,
-        "solutions": solutions,
-        "workflowSteps": workflow_steps,
+        "topics": normalize_text_items(topics, id_prefix="topic"),
+        "discussionPoints": normalize_discussion_points(discussion_points),
+        "decisions": normalize_text_items(decisions, id_prefix="decision"),
+        "actionItems": normalize_action_items(action_items),
+        "problemStatements": normalize_text_items(problem_statements, id_prefix="problem"),
+        "solutions": normalize_solution_items(solutions),
+        "risks": normalize_text_items(risks, id_prefix="risk"),
+        "followUps": normalize_text_items(follow_ups, id_prefix="followup"),
+        "workflowSteps": normalize_workflow_steps(workflow_steps),
         "mindMap": {
             "title": "Meeting Mind Map",
             "nodes": normalize_mind_map_nodes(mind_nodes),
@@ -1008,9 +1083,14 @@ def empty_meeting_analysis() -> Dict[str, Any]:
     return {
         "meetingTitle": "",
         "overview": "",
+        "topics": [],
         "discussionPoints": [],
+        "decisions": [],
+        "actionItems": [],
         "problemStatements": [],
         "solutions": [],
+        "risks": [],
+        "followUps": [],
         "workflowSteps": [],
         "mindMap": {
             "title": "Meeting Mind Map",
@@ -1055,9 +1135,13 @@ def safe_json_parse(text: Any) -> Dict[str, Any]:
     if isinstance(data.get("analysis"), dict):
         data = data["analysis"]
 
+    if isinstance(data.get("meetingAnalysis"), dict):
+        data = data["meetingAnalysis"]
+
     meeting_title = str(
         data.get("meetingTitle")
         or data.get("meeting_title")
+        or data.get("title")
         or ""
     ).strip()
 
@@ -1076,9 +1160,35 @@ def safe_json_parse(text: Any) -> Dict[str, Any]:
     if not summary and overview:
         summary = overview
 
+    topics = normalize_text_items(
+        data.get("topics")
+        or data.get("keyTopics")
+        or data.get("key_topics")
+        or [],
+        id_prefix="topic",
+    )
+
     discussion_points = normalize_discussion_points(
         data.get("discussionPoints")
         or data.get("discussion_points")
+        or data.get("keyPoints")
+        or data.get("key_points")
+        or []
+    )
+
+    decisions = normalize_text_items(
+        data.get("decisions")
+        or data.get("decisionsTaken")
+        or data.get("decision_points")
+        or [],
+        id_prefix="decision",
+    )
+
+    action_items = normalize_action_items(
+        data.get("actionItems")
+        or data.get("action_items")
+        or data.get("tasks")
+        or data.get("nextActions")
         or []
     )
 
@@ -1098,6 +1208,23 @@ def safe_json_parse(text: Any) -> Dict[str, Any]:
         or []
     )
 
+    risks = normalize_text_items(
+        data.get("risks")
+        or data.get("concerns")
+        or data.get("blockers")
+        or [],
+        id_prefix="risk",
+    )
+
+    follow_ups = normalize_text_items(
+        data.get("followUps")
+        or data.get("follow_ups")
+        or data.get("followups")
+        or data.get("next_steps")
+        or [],
+        id_prefix="followup",
+    )
+
     workflow_steps = normalize_workflow_steps(
         data.get("workflowSteps")
         or data.get("workflow_steps")
@@ -1114,9 +1241,14 @@ def safe_json_parse(text: Any) -> Dict[str, Any]:
     return {
         "meetingTitle": meeting_title,
         "overview": overview,
+        "topics": topics,
         "discussionPoints": discussion_points,
+        "decisions": decisions,
+        "actionItems": action_items,
         "problemStatements": problem_statements,
         "solutions": solutions,
+        "risks": risks,
+        "followUps": follow_ups,
         "workflowSteps": workflow_steps,
         "mindMap": mind_map,
         "summary": summary,
@@ -1149,6 +1281,10 @@ def extract_json_object(text: str) -> str:
             or "discussion_points" in candidate
             or "summary" in candidate
             or "mindMap" in candidate
+            or "meetingTitle" in candidate
+            or "topics" in candidate
+            or "actionItems" in candidate
+            or "decisions" in candidate
         ):
             return candidate.strip()
 
@@ -1236,8 +1372,12 @@ def looks_like_json(value: str) -> bool:
         cleaned.startswith("{")
         or cleaned.startswith("[")
         or '"overview"' in cleaned
+        or '"meetingTitle"' in cleaned
+        or '"topics"' in cleaned
         or '"discussionPoints"' in cleaned
         or '"discussion_points"' in cleaned
+        or '"decisions"' in cleaned
+        or '"actionItems"' in cleaned
         or '"problemStatements"' in cleaned
         or '"workflowSteps"' in cleaned
         or '"mindMap"' in cleaned
@@ -1259,11 +1399,17 @@ def is_analysis_empty(result: Dict[str, Any]) -> bool:
 
     return not any(
         [
+            str(result.get("meetingTitle", "") or "").strip(),
             str(result.get("overview", "") or "").strip(),
             str(result.get("summary", "") or "").strip(),
+            result.get("topics", []),
             result.get("discussionPoints", []),
+            result.get("decisions", []),
+            result.get("actionItems", []),
             result.get("problemStatements", []),
             result.get("solutions", []),
+            result.get("risks", []),
+            result.get("followUps", []),
             result.get("workflowSteps", []),
             mind_nodes,
         ]
@@ -1289,8 +1435,22 @@ def ensure_minimum_analysis(
     if looks_like_json(summary):
         summary = ""
 
+    topics = normalize_text_items(
+        result.get("topics", []),
+        id_prefix="topic",
+    )
+
     discussion_points = normalize_discussion_points(
         result.get("discussionPoints", [])
+    )
+
+    decisions = normalize_text_items(
+        result.get("decisions", []),
+        id_prefix="decision",
+    )
+
+    action_items = normalize_action_items(
+        result.get("actionItems", [])
     )
 
     problem_statements = normalize_text_items(
@@ -1300,6 +1460,16 @@ def ensure_minimum_analysis(
 
     solutions = normalize_solution_items(
         result.get("solutions", [])
+    )
+
+    risks = normalize_text_items(
+        result.get("risks", []),
+        id_prefix="risk",
+    )
+
+    follow_ups = normalize_text_items(
+        result.get("followUps", []),
+        id_prefix="followup",
     )
 
     workflow_steps = normalize_workflow_steps(
@@ -1331,8 +1501,24 @@ def ensure_minimum_analysis(
             }
         ]
 
+    if not topics:
+        topics = normalize_text_items(
+            [
+                {
+                    "title": meeting_title,
+                    "description": overview,
+                }
+            ],
+            id_prefix="topic",
+        )
+
     if not has_mind_map_nodes(mind_map):
         mind_map = build_mind_map_from_analysis(
+            topics=topics,
+            decisions=decisions,
+            action_items=action_items,
+            risks=risks,
+            follow_ups=follow_ups,
             discussion_points=discussion_points,
             problem_statements=problem_statements,
             solutions=solutions,
@@ -1342,9 +1528,14 @@ def ensure_minimum_analysis(
     return {
         "meetingTitle": meeting_title,
         "overview": overview,
+        "topics": topics,
         "discussionPoints": discussion_points,
+        "decisions": decisions,
+        "actionItems": action_items,
         "problemStatements": problem_statements,
         "solutions": solutions,
+        "risks": risks,
+        "followUps": follow_ups,
         "workflowSteps": workflow_steps,
         "mindMap": mind_map,
         "summary": summary,
@@ -1358,6 +1549,7 @@ def fallback_analysis_from_transcript(transcript_text: str) -> Dict[str, Any]:
         return {
             "meetingTitle": "Meeting Audio Analysis",
             "overview": "No clear speech transcript could be generated from this audio. Please check the recording quality and try again.",
+            "topics": [],
             "discussionPoints": [
                 {
                     "id": "point_1",
@@ -1366,8 +1558,18 @@ def fallback_analysis_from_transcript(transcript_text: str) -> Dict[str, Any]:
                     "status": "pending",
                 }
             ],
+            "decisions": [],
+            "actionItems": [],
             "problemStatements": [],
             "solutions": [],
+            "risks": [
+                {
+                    "id": "risk_1",
+                    "title": "Recording Quality Issue",
+                    "description": "The uploaded audio may be empty, unclear, too short, or unsupported.",
+                }
+            ],
+            "followUps": [],
             "workflowSteps": [],
             "mindMap": {
                 "title": "Meeting Mind Map",
@@ -1393,6 +1595,13 @@ def fallback_analysis_from_transcript(transcript_text: str) -> Dict[str, Any]:
             "so this overview is based directly on the transcript excerpt: "
             f"{excerpt}"
         ),
+        "topics": [
+            {
+                "id": "topic_1",
+                "title": title,
+                "description": excerpt,
+            }
+        ],
         "discussionPoints": [
             {
                 "id": "point_1",
@@ -1401,8 +1610,12 @@ def fallback_analysis_from_transcript(transcript_text: str) -> Dict[str, Any]:
                 "status": "pending",
             }
         ],
+        "decisions": [],
+        "actionItems": [],
         "problemStatements": [],
         "solutions": [],
+        "risks": [],
+        "followUps": [],
         "workflowSteps": [],
         "mindMap": {
             "title": "Meeting Mind Map",
@@ -1516,12 +1729,65 @@ def has_mind_map_nodes(mind_map: Dict[str, Any]) -> bool:
 
 
 def build_mind_map_from_analysis(
+    topics: List[Dict[str, Any]],
+    decisions: List[Dict[str, Any]],
+    action_items: List[Dict[str, Any]],
+    risks: List[Dict[str, Any]],
+    follow_ups: List[Dict[str, Any]],
     discussion_points: List[Dict[str, Any]],
     problem_statements: List[Dict[str, Any]],
     solutions: List[Dict[str, Any]],
     workflow_steps: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     nodes = []
+
+    if topics:
+        nodes.append(
+            {
+                "id": "node_topics",
+                "label": "Key Topics",
+                "children": [
+                    {
+                        "id": f"node_topic_{index + 1}",
+                        "label": str(item.get("title") or f"Topic {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(topics[:6])
+                ],
+            }
+        )
+
+    if decisions:
+        nodes.append(
+            {
+                "id": "node_decisions",
+                "label": "Decisions",
+                "children": [
+                    {
+                        "id": f"node_decision_{index + 1}",
+                        "label": str(item.get("title") or f"Decision {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(decisions[:6])
+                ],
+            }
+        )
+
+    if action_items:
+        nodes.append(
+            {
+                "id": "node_actions",
+                "label": "Action Items",
+                "children": [
+                    {
+                        "id": f"node_action_{index + 1}",
+                        "label": str(item.get("title") or f"Action {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(action_items[:6])
+                ],
+            }
+        )
 
     if discussion_points:
         nodes.append(
@@ -1567,6 +1833,38 @@ def build_mind_map_from_analysis(
                         "children": [],
                     }
                     for index, item in enumerate(solutions[:6])
+                ],
+            }
+        )
+
+    if risks:
+        nodes.append(
+            {
+                "id": "node_risks",
+                "label": "Risks & Concerns",
+                "children": [
+                    {
+                        "id": f"node_risk_{index + 1}",
+                        "label": str(item.get("title") or f"Risk {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(risks[:6])
+                ],
+            }
+        )
+
+    if follow_ups:
+        nodes.append(
+            {
+                "id": "node_followups",
+                "label": "Follow-ups",
+                "children": [
+                    {
+                        "id": f"node_followup_{index + 1}",
+                        "label": str(item.get("title") or f"Follow-up {index + 1}"),
+                        "children": [],
+                    }
+                    for index, item in enumerate(follow_ups[:6])
                 ],
             }
         )
@@ -1656,37 +1954,87 @@ def normalize_text_items(value: Any, id_prefix: str) -> List[Dict[str, Any]]:
         return []
 
     normalized_items = []
+    seen = set()
 
     for index, item in enumerate(value):
         if isinstance(item, str):
-            text = item.strip()
-
-            if not text:
-                continue
-
-            normalized_items.append(
-                {
-                    "id": f"{id_prefix}_{index + 1}",
-                    "title": f"{id_prefix.title()} {index + 1}",
-                    "description": text,
-                }
-            )
+            title = f"{id_prefix.title()} {len(normalized_items) + 1}"
+            description = item.strip()
+        elif isinstance(item, dict):
+            title = str(item.get("title") or "").strip()
+            description = str(item.get("description") or "").strip()
+        else:
             continue
-
-        if not isinstance(item, dict):
-            continue
-
-        title = str(item.get("title") or "").strip()
-        description = str(item.get("description") or "").strip()
 
         if not title and not description:
             continue
 
+        if not title:
+            title = f"{id_prefix.title()} {len(normalized_items) + 1}"
+
+        key = f"{title.lower()}::{description.lower()}"
+        if key in seen:
+            continue
+
+        seen.add(key)
+
         normalized_items.append(
             {
-                "id": str(item.get("id") or f"{id_prefix}_{index + 1}"),
-                "title": title or f"{id_prefix.title()} {index + 1}",
+                "id": f"{id_prefix}_{len(normalized_items) + 1}",
+                "title": title,
                 "description": description,
+            }
+        )
+
+    return normalized_items
+
+
+def normalize_action_items(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_items = []
+    seen = set()
+
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            title = f"Action {len(normalized_items) + 1}"
+            description = item.strip()
+            owner = "Not specified"
+            deadline = "Not specified"
+            status = "pending"
+        elif isinstance(item, dict):
+            title = str(item.get("title") or "").strip()
+            description = str(item.get("description") or "").strip()
+            owner = str(item.get("owner") or "Not specified").strip()
+            deadline = str(item.get("deadline") or "Not specified").strip()
+            status = str(item.get("status") or "pending").lower().strip()
+        else:
+            continue
+
+        if not title and not description:
+            continue
+
+        if status not in ["done", "pending", "not_done", "in_progress"]:
+            status = "pending"
+
+        if not title:
+            title = f"Action {len(normalized_items) + 1}"
+
+        key = f"{title.lower()}::{description.lower()}::{owner.lower()}::{deadline.lower()}::{status}"
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        normalized_items.append(
+            {
+                "id": f"action_{len(normalized_items) + 1}",
+                "title": title,
+                "description": description,
+                "owner": owner or "Not specified",
+                "deadline": deadline or "Not specified",
+                "status": status,
             }
         )
 
@@ -1849,25 +2197,47 @@ def normalize_mind_map_nodes(value: Any) -> List[Dict[str, Any]]:
 
 
 def ask_from_transcript(transcript_text: str, question: str) -> str:
-    prompt = f"""
-Answer the user's question based only on this meeting transcript.
+    transcript_text = str(transcript_text or "").strip()
+    question = str(question or "").strip()
 
-If the answer is not available in the transcript, say:
+    if not transcript_text:
+        return "I could not find any transcript text to answer from."
+
+    if not question:
+        return "Please ask a question about the meeting."
+
+    relevant_chunks = find_relevant_transcript_chunks(
+        transcript_text=transcript_text,
+        question=question,
+        max_chunks=5,
+    )
+
+    evidence_text = "\n\n".join(relevant_chunks).strip()
+
+    if not evidence_text:
+        evidence_text = transcript_text[:6000]
+
+    prompt = f"""
+{ENGLISH_ONLY_RULE}
+
+Answer the user's question based only on the meeting transcript evidence below.
+
+If the answer is not available in the evidence, say:
 "I could not find this information in the meeting transcript."
 
 Rules:
 - Answer only in English.
-- If the question is in Hindi, Bengali, Hinglish, or mixed language, understand it and answer in English.
-- If the transcript contains Hindi, Bengali, Hinglish, or mixed language, translate the meaning and answer in English.
-- Do not use Hindi script.
-- Do not use Bengali script.
-- Do not use mixed-language text.
-- Keep the answer direct and useful.
+- Be direct and useful.
+- Do not invent information.
+- If the question is in Hindi, Bengali, Hinglish, Banglish, or mixed language, understand it and answer in English.
+- If the evidence contains Hindi, Bengali, Hinglish, Banglish, or mixed language, translate the meaning and answer in English.
+- If there are decisions, numbers, deadlines, dates, names, or commitments, preserve them exactly.
+- If useful, include a short "Evidence:" line using the relevant transcript wording.
 
-Transcript:
-{transcript_text}
+Meeting transcript evidence:
+{evidence_text}
 
-Question:
+User question:
 {question}
 """
 
@@ -1877,6 +2247,45 @@ Question:
         return ""
 
     return str(answer).strip()
+
+
+def find_relevant_transcript_chunks(
+    transcript_text: str,
+    question: str,
+    max_chunks: int = 5,
+) -> List[str]:
+    chunks = split_text_into_chunks(transcript_text, max_words=350)
+
+    if not chunks:
+        return []
+
+    question_terms = {
+        term.strip().lower()
+        for term in question.replace("?", " ").replace(",", " ").replace(".", " ").split()
+        if len(term.strip()) >= 3
+    }
+
+    scored_chunks = []
+
+    for index, chunk in enumerate(chunks):
+        lower_chunk = chunk.lower()
+        score = 0
+
+        for term in question_terms:
+            if term in lower_chunk:
+                score += 1
+
+        if score > 0:
+            scored_chunks.append((score, index, chunk))
+
+    if not scored_chunks:
+        return chunks[:max_chunks]
+
+    scored_chunks.sort(key=lambda item: (-item[0], item[1]))
+    selected = scored_chunks[:max_chunks]
+    selected.sort(key=lambda item: item[1])
+
+    return [item[2] for item in selected]
 
 
 def call_sarvam_chat(prompt: str) -> str:
@@ -1897,9 +2306,10 @@ def call_sarvam_chat(prompt: str) -> str:
                 "content": final_prompt,
             }
         ],
-        "temperature": 0.2,
-        "max_tokens": 4096,
+        "temperature": 0.1,
+        "max_tokens": SARVAM_CHAT_MAX_TOKENS,
     }
+
     response = requests.post(
         url,
         headers=headers,
@@ -1913,7 +2323,6 @@ def call_sarvam_chat(prompt: str) -> str:
         )
 
     data = response.json()
-
     choices = data.get("choices") or []
 
     if not choices:
