@@ -388,6 +388,10 @@ def process_meeting_background(
 
         result = {
             "meetingId": meeting_id,
+            "audioCategory": analysis_result.get("audioCategory", "general_conversation"),
+            "categoryLabel": analysis_result.get("categoryLabel", "General Conversation / Unknown"),
+            "categoryConfidence": analysis_result.get("categoryConfidence", 0.0),
+            "classificationReason": analysis_result.get("classificationReason", ""),
             "meetingTitle": meeting_title,
             "generatedAt": generated_at,
             "suggestedAudioFileName": build_suggested_audio_file_name(
@@ -396,6 +400,8 @@ def process_meeting_background(
                 audio_path=audio_path,
             ),
             "overview": analysis_result.get("overview", ""),
+            "summary": analysis_result.get("summary", ""),
+            "keyPoints": analysis_result.get("keyPoints", []),
             "topics": analysis_result.get("topics", []),
             "discussionPoints": analysis_result.get("discussionPoints", []),
             "decisions": analysis_result.get("decisions", []),
@@ -404,15 +410,19 @@ def process_meeting_background(
             "solutions": analysis_result.get("solutions", []),
             "risks": analysis_result.get("risks", []),
             "followUps": analysis_result.get("followUps", []),
+            "suggestions": analysis_result.get("suggestions", []),
+            "approaches": analysis_result.get("approaches", []),
+            "guide": analysis_result.get("guide", []),
             "workflowSteps": analysis_result.get("workflowSteps", []),
+            "categorySpecificOutput": analysis_result.get("categorySpecificOutput", {}),
+            "coverageCheck": analysis_result.get("coverageCheck", {}),
             "mindMap": analysis_result.get(
                 "mindMap",
                 {
-                    "title": "Meeting Mind Map",
+                    "title": "Audio Mind Map",
                     "nodes": [],
                 },
             ),
-            "summary": analysis_result.get("summary", ""),
             "transcriptText": transcript_text,
             "utterances": utterances,
         }
@@ -664,175 +674,434 @@ def normalize_sarvam_transcription(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+
+def category_label_for(category: str) -> str:
+    labels = {
+        "business_meeting": "Business Meeting",
+        "sales_client_vendor_call": "Sales / Client / Vendor Call",
+        "lecture_class_training": "Lecture / Class / Training",
+        "interview_hr_discussion": "Interview / HR Discussion",
+        "motivational_speech_seminar": "Motivational Speech / Seminar",
+        "brainstorming_strategy": "Brainstorming / Strategy",
+        "product_project_discussion": "Product / Project Discussion",
+        "finance_legal_compliance": "Finance / Legal / Compliance",
+        "customer_support_complaint": "Customer Support / Complaint",
+        "personal_voice_note_idea": "Personal Voice Note / Idea Capture",
+        "podcast_webinar_panel": "Podcast / Webinar / Panel",
+        "general_conversation": "General Conversation / Unknown",
+    }
+    return labels.get(str(category or "").strip(), labels["general_conversation"])
+
+
+VALID_AUDIO_CATEGORIES = {
+    "business_meeting",
+    "sales_client_vendor_call",
+    "lecture_class_training",
+    "interview_hr_discussion",
+    "motivational_speech_seminar",
+    "brainstorming_strategy",
+    "product_project_discussion",
+    "finance_legal_compliance",
+    "customer_support_complaint",
+    "personal_voice_note_idea",
+    "podcast_webinar_panel",
+    "general_conversation",
+}
+
+
+CATEGORY_SPECIFIC_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "business_meeting": {
+        "meetingObjective": "",
+        "keyAgenda": [],
+        "managementSummary": "",
+        "decisionsTaken": [],
+        "ownersAndDeadlines": [],
+        "blockers": [],
+        "nextMeetingPreparation": [],
+    },
+    "sales_client_vendor_call": {
+        "clientOrVendorName": "Not specified",
+        "purposeOfCall": "",
+        "clientNeeds": [],
+        "objectionsOrConcerns": [],
+        "priceOrCommercialPoints": [],
+        "commitmentsMade": [],
+        "followUpPlan": [],
+        "suggestedResponse": [],
+        "dealStatus": "open / closed / pending / unclear",
+    },
+    "lecture_class_training": {
+        "topicTaught": "",
+        "learningObjectives": [],
+        "keyConcepts": [],
+        "definitions": [],
+        "examplesExplained": [],
+        "importantFormulasOrFrameworks": [],
+        "revisionNotes": [],
+        "questionsToPractice": [],
+        "studyGuide": [],
+    },
+    "interview_hr_discussion": {
+        "interviewPurpose": "",
+        "candidateProfile": "",
+        "questionsAsked": [],
+        "answerSummary": [],
+        "strengths": [],
+        "weaknessesOrConcerns": [],
+        "skillsObserved": [],
+        "cultureFitNotes": [],
+        "finalRecommendation": "",
+        "nextRoundQuestions": [],
+    },
+    "motivational_speech_seminar": {
+        "coreMessage": "",
+        "keyTakeaways": [],
+        "memorableQuotes": [],
+        "lifeLessons": [],
+        "actionPrinciples": [],
+        "practicalGuide": [],
+        "audienceImpact": "",
+        "suggestedDailyActions": [],
+    },
+    "brainstorming_strategy": {
+        "brainstormingGoal": "",
+        "ideasGenerated": [],
+        "promisingIdeas": [],
+        "rejectedOrWeakIdeas": [],
+        "strategicDirection": [],
+        "creativeApproaches": [],
+        "executionPlan": [],
+        "successMetrics": [],
+    },
+    "product_project_discussion": {
+        "projectName": "",
+        "requirements": [],
+        "featuresDiscussed": [],
+        "bugsOrIssues": [],
+        "technicalDecisions": [],
+        "dependencies": [],
+        "roadmap": [],
+        "testingChecklist": [],
+        "releaseReadiness": "",
+    },
+    "finance_legal_compliance": {
+        "financialSummary": "",
+        "amountsMentioned": [],
+        "documentsRequired": [],
+        "approvalsNeeded": [],
+        "complianceRisks": [],
+        "legalConcerns": [],
+        "paymentOrRefundStatus": "",
+        "nextComplianceSteps": [],
+    },
+    "customer_support_complaint": {
+        "customerIssue": "",
+        "customerSentiment": "positive / neutral / negative / angry / unclear",
+        "rootCause": "",
+        "resolutionSuggested": [],
+        "escalationNeeded": "",
+        "refundOrReplacementMentioned": "",
+        "supportFollowUp": [],
+        "preventionSuggestion": [],
+    },
+    "personal_voice_note_idea": {
+        "cleanedNote": "",
+        "ideas": [],
+        "tasks": [],
+        "reminders": [],
+        "priorityItems": [],
+        "suggestedNextActions": [],
+        "convertedToProfessionalNote": "",
+    },
+    "podcast_webinar_panel": {
+        "mainTopic": "",
+        "speakerViewpoints": [],
+        "keyThemes": [],
+        "importantArguments": [],
+        "audienceTakeaways": [],
+        "interestingQuotes": [],
+        "summaryForSharing": "",
+        "contentIdeasFromAudio": [],
+    },
+    "general_conversation": {
+        "conversationSummary": "",
+        "importantPoints": [],
+        "possibleActions": [],
+        "peopleMentioned": [],
+        "datesOrNumbersMentioned": [],
+        "unclearSections": [],
+        "suggestedCategory": "",
+    },
+}
+
+
+def default_classification() -> Dict[str, Any]:
+    return {
+        "audioCategory": "general_conversation",
+        "categoryLabel": category_label_for("general_conversation"),
+        "categoryConfidence": 0.35,
+        "classificationReason": "The transcript did not strongly match a specific audio type.",
+    }
+
+
+def classify_audio_category(transcript_text: str) -> Dict[str, Any]:
+    transcript_text = str(transcript_text or "").strip()
+    if not transcript_text:
+        return default_classification()
+
+    options_text = "\n".join(
+        f"- {category}: {category_label_for(category)}"
+        for category in sorted(VALID_AUDIO_CATEGORIES)
+    )
+
+    prompt = f"""
+{ENGLISH_ONLY_RULE}
+
+Classify this audio transcript into exactly one category.
+
+Allowed categories:
+{options_text}
+
+Return ONLY valid JSON in this format:
+{{
+  "audioCategory": "business_meeting",
+  "categoryLabel": "Business Meeting",
+  "categoryConfidence": 0.0,
+  "classificationReason": "Short factual reason based on the transcript."
+}}
+
+Category rules:
+- Choose lecture_class_training for teaching, class, training, concepts, examples, definitions, revision, or learning.
+- Choose interview_hr_discussion for interviewer/candidate, HR, hiring, skills, experience, salary, joining, or evaluation.
+- Choose motivational_speech_seminar for inspirational, life lesson, self-growth, leadership, success, or seminar tone.
+- Choose sales_client_vendor_call for client/vendor/dealer/customer business call, price, quotation, order, margin, payment, negotiation, or commitment.
+- Choose product_project_discussion for app, website, software, feature, bug, backend, API, design, testing, launch, product, or project planning.
+- Choose finance_legal_compliance for audit, GST, invoice, PI, payment, tax, agreement, legal, compliance, approval, or documents.
+- Choose customer_support_complaint for complaint, service issue, refund, replacement, escalation, customer dissatisfaction, or defect.
+- Choose brainstorming_strategy for idea generation, campaign strategy, creative planning, roadmap, positioning, or brainstorming.
+- Choose personal_voice_note_idea for one-person reminder, thought capture, idea note, task note, or personal planning.
+- Choose podcast_webinar_panel for episode, webinar, public talk, panel, audience questions, or speaker viewpoints.
+- Choose business_meeting for internal review, decision meeting, team planning, operations, or management discussion.
+- Choose general_conversation only if no specific category fits.
+
+Transcript sample:
+{make_transcript_context(transcript_text, max_chars=9000)}
+"""
+
+    try:
+        parsed = parse_json_object(call_sarvam_chat(prompt))
+        return normalize_classification(parsed, transcript_text)
+    except Exception:
+        return heuristic_classification(transcript_text)
+
+
+def normalize_classification(data: Any, transcript_text: str) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return heuristic_classification(transcript_text)
+
+    category = str(
+        data.get("audioCategory")
+        or data.get("audio_category")
+        or data.get("category")
+        or ""
+    ).strip()
+
+    if category not in VALID_AUDIO_CATEGORIES:
+        return heuristic_classification(transcript_text)
+
+    try:
+        confidence = float(data.get("categoryConfidence") or data.get("category_confidence") or 0.65)
+    except Exception:
+        confidence = 0.65
+
+    confidence = max(0.0, min(confidence, 1.0))
+
+    reason = str(
+        data.get("classificationReason")
+        or data.get("classification_reason")
+        or ""
+    ).strip()
+
+    if not reason:
+        reason = f"The transcript matched the {category_label_for(category)} pattern."
+
+    return {
+        "audioCategory": category,
+        "categoryLabel": category_label_for(category),
+        "categoryConfidence": confidence,
+        "classificationReason": reason,
+    }
+
+
+def heuristic_classification(transcript_text: str) -> Dict[str, Any]:
+    text = str(transcript_text or "").lower()
+
+    keyword_groups = [
+        ("lecture_class_training", ["class", "lecture", "student", "teacher", "chapter", "definition", "formula", "example", "exam", "training", "learning"]),
+        ("interview_hr_discussion", ["interview", "candidate", "resume", "salary", "joining", "experience", "skills", "hr", "notice period", "tell me about yourself"]),
+        ("motivational_speech_seminar", ["motivation", "success", "dream", "failure", "life", "inspire", "leadership", "mindset", "discipline", "seminar"]),
+        ("sales_client_vendor_call", ["client", "vendor", "dealer", "customer", "quotation", "price", "margin", "order", "payment", "delivery", "follow up", "commitment"]),
+        ("product_project_discussion", ["app", "api", "backend", "frontend", "feature", "bug", "testing", "release", "project", "product", "ui", "server", "github"]),
+        ("finance_legal_compliance", ["gst", "invoice", "audit", "payment", "tax", "legal", "agreement", "compliance", "approval", "pi", "refund"]),
+        ("customer_support_complaint", ["complaint", "issue", "problem", "defect", "replacement", "refund", "escalate", "support", "service"]),
+        ("brainstorming_strategy", ["idea", "brainstorm", "strategy", "campaign", "creative", "concept", "positioning", "roadmap"]),
+        ("podcast_webinar_panel", ["podcast", "webinar", "episode", "panel", "audience", "host", "speaker"]),
+        ("personal_voice_note_idea", ["remind me", "note to self", "my idea", "i need to", "i should", "remember to"]),
+        ("business_meeting", ["meeting", "review", "decision", "agenda", "team", "management", "approval", "timeline", "target"]),
+    ]
+
+    best_category = "general_conversation"
+    best_score = 0
+
+    for category, keywords in keyword_groups:
+        score = sum(1 for keyword in keywords if keyword in text)
+        if score > best_score:
+            best_score = score
+            best_category = category
+
+    if best_score <= 0:
+        confidence = 0.35
+        reason = "No strong category-specific keywords were detected."
+    else:
+        confidence = min(0.55 + (best_score * 0.06), 0.86)
+        reason = f"Matched category-specific terms for {category_label_for(best_category)}."
+
+    return {
+        "audioCategory": best_category,
+        "categoryLabel": category_label_for(best_category),
+        "categoryConfidence": confidence,
+        "classificationReason": reason,
+    }
+
+
 def analyze_meeting(transcript_text: str) -> Dict[str, Any]:
     transcript_text = str(transcript_text or "").strip()
 
     if not transcript_text:
         return fallback_analysis_from_transcript("")
 
-    chunks = split_text_into_chunks(transcript_text, max_words=2500)
+    classification = classify_audio_category(transcript_text)
+    chunks = split_text_into_chunks(transcript_text, max_words=2200)
 
     if len(chunks) == 1:
-        result = analyze_meeting_chunk(
+        analysis = analyze_meeting_chunk(
             transcript_text=chunks[0],
             chunk_number=1,
             total_chunks=1,
+            classification=classification,
         )
-        return ensure_minimum_analysis(result, transcript_text)
+    else:
+        chunk_results = []
+        for index, chunk in enumerate(chunks):
+            chunk_result = analyze_meeting_chunk(
+                transcript_text=chunk,
+                chunk_number=index + 1,
+                total_chunks=len(chunks),
+                classification=classification,
+            )
+            chunk_results.append(chunk_result)
 
-    chunk_results = []
-
-    for index, chunk in enumerate(chunks):
-        chunk_result = analyze_meeting_chunk(
-            transcript_text=chunk,
-            chunk_number=index + 1,
-            total_chunks=len(chunks),
+        analysis = merge_meeting_analysis(
+            chunk_results=chunk_results,
+            transcript_text=transcript_text,
+            classification=classification,
         )
-        chunk_results.append(chunk_result)
 
-    merged = merge_meeting_analysis(chunk_results)
-    return ensure_minimum_analysis(merged, transcript_text)
+    analysis = ensure_minimum_analysis(analysis, transcript_text)
+    analysis.update(classification)
+
+    title = generate_meaningful_title(
+        transcript_text=transcript_text,
+        analysis_result=analysis,
+        classification=classification,
+    )
+    if title:
+        analysis["meetingTitle"] = title
+
+    return ensure_minimum_analysis(analysis, transcript_text)
 
 
 def analyze_meeting_chunk(
     transcript_text: str,
     chunk_number: int,
     total_chunks: int,
+    classification: Dict[str, Any],
 ) -> Dict[str, Any]:
+    category = classification.get("audioCategory", "general_conversation")
+    category_label = classification.get("categoryLabel", category_label_for(category))
+    category_schema = json.dumps(
+        CATEGORY_SPECIFIC_SCHEMAS.get(category, CATEGORY_SPECIFIC_SCHEMAS["general_conversation"]),
+        ensure_ascii=False,
+        indent=2,
+    )
+
     prompt = f"""
 {ENGLISH_ONLY_RULE}
 
-You are a senior meeting intelligence analyst for a premium business productivity app.
+You are a premium audio intelligence analyst.
+The audio has been classified as: {category_label} ({category}).
 
-Your job is to produce output that feels like a professional meeting analyst wrote it,
-not like a basic AI summarizer.
+Analyze the transcript chunk according to this category. The output must adapt to the category.
+Do not force business-meeting sections when the audio is a lecture, interview, motivational speech, podcast, complaint, or voice note.
 
-Analyze this meeting transcript chunk and return exactly one valid JSON object.
+Return ONLY one valid JSON object.
 
-Required JSON object:
+Required JSON format:
 {{
-  "meetingTitle": "Short meaningful meeting title in 5 to 8 words. Do not include date or time.",
-  "overview": "Executive overview of this meeting chunk in 4 to 6 strong business lines.",
-  "topics": [
-    {{
-      "id": "topic_1",
-      "title": "Main topic title",
-      "description": "What was discussed under this topic."
-    }}
-  ],
-  "discussionPoints": [
-    {{
-      "id": "point_1",
-      "title": "Short discussion title",
-      "description": "Detailed, useful business explanation of what was discussed.",
-      "status": "done"
-    }}
-  ],
-  "decisions": [
-    {{
-      "id": "decision_1",
-      "title": "Decision title",
-      "description": "Decision details, if a decision was made or confirmed."
-    }}
-  ],
-  "actionItems": [
-    {{
-      "id": "action_1",
-      "title": "Action item title",
-      "description": "What needs to be done.",
-      "owner": "Owner if mentioned, otherwise Not specified",
-      "deadline": "Deadline if mentioned, otherwise Not specified",
-      "status": "pending"
-    }}
-  ],
-  "problemStatements": [
-    {{
-      "id": "problem_1",
-      "title": "Short problem or challenge title",
-      "description": "Clear explanation of the problem, blocker, concern, risk, or challenge."
-    }}
-  ],
-  "solutions": [
-    {{
-      "id": "solution_1",
-      "title": "Short solution title",
-      "description": "Solution, recommendation, decision, or proposed approach.",
-      "relatedProblemId": "problem_1"
-    }}
-  ],
-  "risks": [
-    {{
-      "id": "risk_1",
-      "title": "Risk or concern title",
-      "description": "Risk, concern, dependency, objection, or uncertainty discussed."
-    }}
-  ],
-  "followUps": [
-    {{
-      "id": "followup_1",
-      "title": "Follow-up title",
-      "description": "Follow-up, next discussion, review, approval, or confirmation needed."
-    }}
-  ],
-  "workflowSteps": [
-    {{
-      "step": 1,
-      "title": "Step title",
-      "description": "Step-by-step action, process, workflow, or next step."
-    }}
-  ],
-  "mindMap": {{
-    "title": "Meeting Mind Map",
-    "nodes": [
-      {{
-        "id": "node_1",
-        "label": "Main topic",
-        "children": [
-          {{
-            "id": "node_1_1",
-            "label": "Sub topic",
-            "children": []
-          }}
-        ]
-      }}
-    ]
+  "meetingTitle": "Temporary chunk title in 5 to 8 words",
+  "audioCategory": "{category}",
+  "categoryLabel": "{category_label}",
+  "categoryConfidence": {classification.get('categoryConfidence', 0.65)},
+  "classificationReason": "{escape_prompt_text(classification.get('classificationReason', ''))}",
+  "overview": "Category-appropriate executive overview in 4 to 6 lines.",
+  "summary": "Category-appropriate detailed summary in 6 to 10 lines.",
+  "keyPoints": [{{"id":"key_1","title":"Key point title","description":"Important highlight from the transcript."}}],
+  "topics": [{{"id":"topic_1","title":"Topic title","description":"What was discussed or taught under this topic."}}],
+  "discussionPoints": [{{"id":"point_1","title":"Discussion title","description":"Only if the audio has discussion points.","status":"pending"}}],
+  "decisions": [{{"id":"decision_1","title":"Decision title","description":"Only if a decision was actually made."}}],
+  "actionItems": [{{"id":"action_1","title":"Action title","description":"Task details.","owner":"Owner if mentioned, otherwise Not specified","deadline":"Deadline if mentioned, otherwise Not specified","status":"pending"}}],
+  "problemStatements": [{{"id":"problem_1","title":"Problem title","description":"Only if a real problem, blocker, concern, gap, or challenge was discussed."}}],
+  "solutions": [{{"id":"solution_1","title":"Solution title","description":"Only if a solution, recommendation, approach, or answer was discussed.","relatedProblemId":"problem_1"}}],
+  "risks": [{{"id":"risk_1","title":"Risk title","description":"Only if a risk, concern, uncertainty, objection, or dependency exists."}}],
+  "followUps": [{{"id":"followup_1","title":"Follow-up title","description":"Only if follow-up or review is needed."}}],
+  "suggestions": [{{"id":"suggestion_1","title":"Suggestion title","description":"Useful suggestion grounded in the transcript."}}],
+  "approaches": [{{"id":"approach_1","title":"Approach title","description":"Practical way to handle or execute something from the transcript."}}],
+  "guide": [{{"id":"guide_1","title":"Guide step title","description":"Step-by-step guidance relevant to this category."}}],
+  "workflowSteps": [{{"step":1,"title":"Step title","description":"Only if a process or sequence is present."}}],
+  "categorySpecificOutput": {category_schema},
+  "coverageCheck": {{
+    "importantItemsCovered": [],
+    "possibleMissingItems": [],
+    "unclearParts": [],
+    "confidenceNotes": ""
   }},
-  "summary": "Final summary of this chunk in 6 to 10 lines."
+  "mindMap": {{"title":"Audio Mind Map","nodes":[{{"id":"node_1","label":"Main topic","children":[]}}]}}
 }}
 
-Status rules:
-- Use "done" if the point/action was completed, approved, fixed, finalized, resolved, or confirmed.
-- Use "pending" if action is required but not completed.
-- Use "not_done" if the meeting clearly says it was not completed.
-- Use "in_progress" if someone is currently working on it.
+Category-specific instructions:
+- For Lecture/Class/Training: focus on topic taught, key concepts, definitions, examples, revision notes, questions to practice, and study guide.
+- For Interview/HR: focus on candidate profile, questions, answer summaries, strengths, concerns, skills, fit, recommendation, and next questions.
+- For Motivational Speech/Seminar: focus on core message, takeaways, memorable quotes, lessons, action principles, and practical guide.
+- For Sales/Client/Vendor: focus on needs, objections, price/commercial points, commitments, deal status, follow-up plan, and suggested response.
+- For Product/Project: focus on requirements, features, bugs, technical decisions, dependencies, roadmap, testing checklist, and release readiness.
+- For Finance/Legal/Compliance: focus on amounts, documents, approvals, risks, legal/compliance concerns, and next compliance steps.
+- For Customer Support/Complaint: focus on customer issue, sentiment, root cause, resolution, escalation, replacement/refund, and prevention.
+- For Brainstorming/Strategy: focus on ideas, promising options, weak/rejected ideas, direction, creative approaches, execution plan, and success metrics.
+- For Personal Voice Note: convert into cleaned note, ideas, tasks, reminders, priorities, and suggested next actions.
+- For Podcast/Webinar/Panel: focus on speaker viewpoints, key themes, arguments, takeaways, quotes, shareable summary, and content ideas.
+- For Business Meeting: focus on objective, agenda, decisions, action items, owners/deadlines, blockers, risks, and next meeting preparation.
 
 Strict rules:
-- Return only one valid JSON object.
-- Do not add explanation before or after JSON.
-- Do not use markdown code fence.
-- Output all text in English only.
-- If transcript contains Hindi, Hinglish, Bengali, Banglish, or mixed language, translate the meaning into English.
-- Do not invent information not available in the transcript.
-- Preserve names, brand names, article codes, product codes, numbers, dates, prices, commitments, and deadlines.
-- Generate a useful meetingTitle from the actual topic. Do not use generic titles like "Meeting Summary" unless no topic is clear.
-- Extract topic-wise intelligence, not only generic summary.
-- Extract every important business discussion point.
-- Extract decisions separately from discussion points.
-- Extract action items separately with owner/deadline if available.
-- Extract problems, blockers, objections, risks, and challenges separately.
-- Extract solutions, decisions, approaches, and recommendations separately.
-- Extract follow-ups separately.
-- Extract step-by-step workflow only if the transcript contains process or action flow.
-- If a section is not present in the transcript, return an empty array for that section.
-- Always return mindMap with title and nodes array.
-- Never put a JSON object or JSON string inside overview or summary.
-- Keep titles short and useful.
-- Keep descriptions business-friendly, factual, and clear.
+- Return only JSON. No markdown. No explanation.
+- Output English only.
+- Do not invent information.
+- If a field has no real transcript support, return an empty string, empty array, or empty object for that field.
+- Do not put placeholder values like "Not discussed", "No data", "None", or "N/A" inside arrays.
+- Every list item must have meaningful title/description. Remove blank items.
+- Preserve names, product codes, numbers, dates, prices, commitments, and deadlines.
+- Suggestions, approaches, and guide must be practical but still grounded in the transcript.
 
-Chunk:
-{chunk_number} of {total_chunks}
-
-Transcript chunk:
+Chunk {chunk_number} of {total_chunks}:
 {transcript_text}
 """
 
@@ -840,149 +1109,79 @@ Transcript chunk:
     parsed = safe_json_parse(response_text)
 
     if not is_analysis_empty(parsed):
+        parsed.update(classification)
         return ensure_minimum_analysis(parsed, transcript_text)
 
-    retry_prompt = prompt + """
-
-Your previous response was empty, invalid, or not usable.
-Return exactly one valid JSON object now.
-Do not add any explanation.
-Do not use markdown.
-Make sure overview and summary are normal text, not JSON.
-"""
-
-    retry_response_text = call_sarvam_chat(retry_prompt)
-    retry_parsed = safe_json_parse(retry_response_text)
-
-    if not is_analysis_empty(retry_parsed):
-        return ensure_minimum_analysis(retry_parsed, transcript_text)
-
-    return fallback_analysis_from_transcript(transcript_text)
+    return fallback_analysis_from_transcript(transcript_text, classification=classification)
 
 
-def merge_meeting_analysis(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def merge_meeting_analysis(
+    chunk_results: List[Dict[str, Any]],
+    transcript_text: str,
+    classification: Dict[str, Any],
+) -> Dict[str, Any]:
     if not chunk_results:
-        return fallback_analysis_from_transcript("")
+        return fallback_analysis_from_transcript(transcript_text, classification=classification)
 
-    if len(chunk_results) == 1:
-        return ensure_minimum_analysis(chunk_results[0], "")
+    category = classification.get("audioCategory", "general_conversation")
+    category_label = classification.get("categoryLabel", category_label_for(category))
+    category_schema = json.dumps(
+        CATEGORY_SPECIFIC_SCHEMAS.get(category, CATEGORY_SPECIFIC_SCHEMAS["general_conversation"]),
+        ensure_ascii=False,
+        indent=2,
+    )
 
     prompt = f"""
 {ENGLISH_ONLY_RULE}
 
-You are a senior meeting intelligence analyst.
+You are a premium audio intelligence analyst.
+Merge these chunk analyses into one final category-wise output.
 
-Merge these meeting chunk analyses into one final premium meeting note.
+Audio category: {category_label} ({category})
 
-Return exactly one valid JSON object.
+Return ONLY one valid JSON object.
 
-Required JSON object:
+Required JSON format:
 {{
-  "meetingTitle": "Short meaningful meeting title in 5 to 8 words. Do not include date or time.",
-  "overview": "Executive overview of the complete meeting in 4 to 6 strong business lines.",
-  "topics": [
-    {{
-      "id": "topic_1",
-      "title": "Main topic title",
-      "description": "What was discussed under this topic."
-    }}
-  ],
-  "discussionPoints": [
-    {{
-      "id": "point_1",
-      "title": "Short discussion title",
-      "description": "Detailed useful business explanation.",
-      "status": "pending"
-    }}
-  ],
-  "decisions": [
-    {{
-      "id": "decision_1",
-      "title": "Decision title",
-      "description": "Decision details."
-    }}
-  ],
-  "actionItems": [
-    {{
-      "id": "action_1",
-      "title": "Action item title",
-      "description": "What needs to be done.",
-      "owner": "Owner if mentioned, otherwise Not specified",
-      "deadline": "Deadline if mentioned, otherwise Not specified",
-      "status": "pending"
-    }}
-  ],
-  "problemStatements": [
-    {{
-      "id": "problem_1",
-      "title": "Short problem or challenge title",
-      "description": "Problem details."
-    }}
-  ],
-  "solutions": [
-    {{
-      "id": "solution_1",
-      "title": "Short solution title",
-      "description": "Solution details.",
-      "relatedProblemId": "problem_1"
-    }}
-  ],
-  "risks": [
-    {{
-      "id": "risk_1",
-      "title": "Risk or concern title",
-      "description": "Risk details."
-    }}
-  ],
-  "followUps": [
-    {{
-      "id": "followup_1",
-      "title": "Follow-up title",
-      "description": "Follow-up details."
-    }}
-  ],
-  "workflowSteps": [
-    {{
-      "step": 1,
-      "title": "Step title",
-      "description": "Step details."
-    }}
-  ],
-  "mindMap": {{
-    "title": "Meeting Mind Map",
-    "nodes": [
-      {{
-        "id": "node_1",
-        "label": "Main topic",
-        "children": []
-      }}
-    ]
+  "meetingTitle": "Meaningful title from the full conversation, not the first sentence, 5 to 8 words",
+  "audioCategory": "{category}",
+  "categoryLabel": "{category_label}",
+  "categoryConfidence": {classification.get('categoryConfidence', 0.65)},
+  "classificationReason": "{escape_prompt_text(classification.get('classificationReason', ''))}",
+  "overview": "Final category-appropriate overview in 4 to 6 strong lines.",
+  "summary": "Final complete summary in 6 to 10 lines.",
+  "keyPoints": [{{"id":"key_1","title":"Key point title","description":"Important highlight."}}],
+  "topics": [{{"id":"topic_1","title":"Topic title","description":"Topic details."}}],
+  "discussionPoints": [{{"id":"point_1","title":"Discussion title","description":"Only if relevant.","status":"pending"}}],
+  "decisions": [{{"id":"decision_1","title":"Decision title","description":"Only if a decision was made."}}],
+  "actionItems": [{{"id":"action_1","title":"Action title","description":"Task details.","owner":"Owner if mentioned, otherwise Not specified","deadline":"Deadline if mentioned, otherwise Not specified","status":"pending"}}],
+  "problemStatements": [{{"id":"problem_1","title":"Problem title","description":"Only if a real problem exists."}}],
+  "solutions": [{{"id":"solution_1","title":"Solution title","description":"Only if a solution or approach exists.","relatedProblemId":"problem_1"}}],
+  "risks": [{{"id":"risk_1","title":"Risk title","description":"Only if risk exists."}}],
+  "followUps": [{{"id":"followup_1","title":"Follow-up title","description":"Only if follow-up exists."}}],
+  "suggestions": [{{"id":"suggestion_1","title":"Suggestion title","description":"Useful suggestion grounded in the audio."}}],
+  "approaches": [{{"id":"approach_1","title":"Approach title","description":"Practical approach grounded in the audio."}}],
+  "guide": [{{"id":"guide_1","title":"Guide step title","description":"Practical guidance relevant to this category."}}],
+  "workflowSteps": [{{"step":1,"title":"Step title","description":"Only if sequence exists."}}],
+  "categorySpecificOutput": {category_schema},
+  "coverageCheck": {{
+    "importantItemsCovered": [],
+    "possibleMissingItems": [],
+    "unclearParts": [],
+    "confidenceNotes": ""
   }},
-  "summary": "Final meeting summary in 6 to 10 lines."
+  "mindMap": {{"title":"Audio Mind Map","nodes":[{{"id":"node_1","label":"Main topic","children":[]}}]}}
 }}
 
-Strict rules:
-- Return only one valid JSON object.
-- Do not add explanation before or after JSON.
-- Do not use markdown code fence.
-- Output English only.
-- Generate a clean meetingTitle from the complete meeting topic.
-- Do not use generic titles like "Meeting Summary" unless no topic is clear.
-- Merge duplicate points.
-- Do not remove distinct points.
-- Preserve important decisions, pending tasks, blockers, confirmations, problems, solutions, risks, and follow-ups.
-- Re-number topic ids as topic_1, topic_2, topic_3, etc.
-- Re-number discussion point ids as point_1, point_2, point_3, etc.
-- Re-number decision ids as decision_1, decision_2, decision_3, etc.
-- Re-number action item ids as action_1, action_2, action_3, etc.
-- Re-number problem ids as problem_1, problem_2, problem_3, etc.
-- Re-number solution ids as solution_1, solution_2, solution_3, etc.
-- Re-number workflow steps from 1.
-- Use only these statuses: done, pending, not_done, in_progress.
-- Create a clean mind map from the final merged meeting topics.
-- Never put a JSON object or JSON string inside overview or summary.
-- Do not invent information outside the given chunk analyses.
-- Make the final output polished, useful, and boardroom-ready.
+Merge rules:
+- The final output must match the category. Do not show generic meeting points for lecture/interview/motivation/podcast unless actually relevant.
+- Remove duplicate and blank items.
+- Preserve distinct decisions, tasks, risks, questions, numbers, dates, people, deadlines, prices, commitments, and names.
+- Do not invent facts.
+- Leave unsupported sections empty.
+- Generate a meaningful meetingTitle after understanding all chunks.
+- categorySpecificOutput must be filled according to {category_label}; do not use the same template for every category.
+- coverageCheck must mention what was covered and any unclear/missing areas.
 
 Chunk analyses:
 {json.dumps(chunk_results, ensure_ascii=False)}
@@ -992,97 +1191,101 @@ Chunk analyses:
     merged = safe_json_parse(response_text)
 
     if not is_analysis_empty(merged):
-        return ensure_minimum_analysis(merged, json.dumps(chunk_results, ensure_ascii=False))
+        merged.update(classification)
+        return ensure_minimum_analysis(merged, transcript_text)
 
-    retry_prompt = prompt + """
+    return fallback_merge_analyses(chunk_results, transcript_text, classification)
 
-Your previous merge response was empty, invalid, or not usable.
-Return exactly one valid JSON object now.
-Do not add any explanation.
-Do not use markdown.
-Make sure overview and summary are normal text, not JSON.
+
+def generate_meaningful_title(
+    transcript_text: str,
+    analysis_result: Dict[str, Any],
+    classification: Dict[str, Any],
+) -> str:
+    category_label = classification.get("categoryLabel", "Audio Notes")
+    existing_title = str(analysis_result.get("meetingTitle", "") or "").strip()
+
+    prompt = f"""
+{ENGLISH_ONLY_RULE}
+
+Create one meaningful title for this audio after understanding the complete context.
+Do NOT copy the first sentence of the transcript.
+Do NOT include date, time, file extension, or speaker label.
+Do NOT use generic titles like "Meeting Notes" or "Audio Summary" unless no topic is clear.
+
+Audio category: {category_label}
+Existing rough title: {existing_title}
+Overview: {analysis_result.get('overview', '')}
+Summary: {analysis_result.get('summary', '')}
+Key topics: {json.dumps(analysis_result.get('topics', []), ensure_ascii=False)}
+
+Transcript context:
+{make_transcript_context(transcript_text, max_chars=9000)}
+
+Return ONLY valid JSON:
+{{"meetingTitle":"5 to 8 word meaningful title"}}
 """
 
-    retry_response_text = call_sarvam_chat(retry_prompt)
-    retry_merged = safe_json_parse(retry_response_text)
+    try:
+        parsed = parse_json_object(call_sarvam_chat(prompt))
+        title = str(parsed.get("meetingTitle") or parsed.get("title") or "").strip()
+        title = clean_generated_title(title)
+        if title:
+            return title
+    except Exception:
+        pass
 
-    if not is_analysis_empty(retry_merged):
-        return ensure_minimum_analysis(retry_merged, json.dumps(chunk_results, ensure_ascii=False))
-
-    return fallback_merge_analyses(chunk_results)
+    return clean_generated_title(existing_title) or generate_title_from_analysis(analysis_result, transcript_text)
 
 
-def fallback_merge_analyses(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    overview_parts = []
-    summary_parts = []
+def clean_generated_title(value: str) -> str:
+    title = " ".join(str(value or "").strip().split())
+    if not title:
+        return ""
 
-    topics = []
-    discussion_points = []
-    decisions = []
-    action_items = []
-    problem_statements = []
-    solutions = []
-    risks = []
-    follow_ups = []
-    workflow_steps = []
-    mind_nodes = []
+    title = title.replace(".m4a", "").replace(".mp4", "").replace(".aac", "")
+    title = title.replace("Speaker:", "").replace("Meeting Summary", "").strip(" -_:,.")
 
-    for result in chunk_results:
-        normalized = ensure_minimum_analysis(result, "")
+    generic = {"meeting notes", "audio notes", "audio summary", "meeting analysis", "discussion summary"}
+    if title.lower() in generic:
+        return ""
 
-        overview = str(normalized.get("overview", "") or "").strip()
-        summary = str(normalized.get("summary", "") or "").strip()
+    words = title.split()
+    if len(words) > 10:
+        title = " ".join(words[:10])
 
-        if overview and not looks_like_json(overview):
-            overview_parts.append(overview)
+    if len(title) > 80:
+        title = title[:77].rstrip() + "..."
 
-        if summary and not looks_like_json(summary):
-            summary_parts.append(summary)
+    return title
 
-        topics.extend(normalized.get("topics", []))
-        discussion_points.extend(normalized.get("discussionPoints", []))
-        decisions.extend(normalized.get("decisions", []))
-        action_items.extend(normalized.get("actionItems", []))
-        problem_statements.extend(normalized.get("problemStatements", []))
-        solutions.extend(normalized.get("solutions", []))
-        risks.extend(normalized.get("risks", []))
-        follow_ups.extend(normalized.get("followUps", []))
-        workflow_steps.extend(normalized.get("workflowSteps", []))
 
-        mind_map = normalized.get("mindMap", {})
+def generate_title_from_analysis(analysis_result: Dict[str, Any], transcript_text: str) -> str:
+    for key in ["topics", "keyPoints", "decisions", "actionItems", "discussionPoints"]:
+        items = analysis_result.get(key, [])
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    title = clean_generated_title(str(item.get("title", "") or ""))
+                    if title:
+                        return title
 
-        if isinstance(mind_map, dict):
-            nodes = mind_map.get("nodes", [])
+    overview = clean_text_field(analysis_result.get("overview", ""))
+    summary = clean_text_field(analysis_result.get("summary", ""))
 
-            if isinstance(nodes, list):
-                mind_nodes.extend(nodes)
-
-    merged = {
-        "meetingTitle": generate_title_from_text(" ".join(overview_parts + summary_parts)),
-        "overview": "\n".join(overview_parts[:6]),
-        "topics": normalize_text_items(topics, id_prefix="topic"),
-        "discussionPoints": normalize_discussion_points(discussion_points),
-        "decisions": normalize_text_items(decisions, id_prefix="decision"),
-        "actionItems": normalize_action_items(action_items),
-        "problemStatements": normalize_text_items(problem_statements, id_prefix="problem"),
-        "solutions": normalize_solution_items(solutions),
-        "risks": normalize_text_items(risks, id_prefix="risk"),
-        "followUps": normalize_text_items(follow_ups, id_prefix="followup"),
-        "workflowSteps": normalize_workflow_steps(workflow_steps),
-        "mindMap": {
-            "title": "Meeting Mind Map",
-            "nodes": normalize_mind_map_nodes(mind_nodes),
-        },
-        "summary": "\n".join(summary_parts[:8]),
-    }
-
-    return ensure_minimum_analysis(merged, " ".join(overview_parts + summary_parts))
+    return generate_title_from_text(overview or summary or transcript_text)
 
 
 def empty_meeting_analysis() -> Dict[str, Any]:
     return {
         "meetingTitle": "",
+        "audioCategory": "general_conversation",
+        "categoryLabel": category_label_for("general_conversation"),
+        "categoryConfidence": 0.0,
+        "classificationReason": "",
         "overview": "",
+        "summary": "",
+        "keyPoints": [],
         "topics": [],
         "discussionPoints": [],
         "decisions": [],
@@ -1091,209 +1294,485 @@ def empty_meeting_analysis() -> Dict[str, Any]:
         "solutions": [],
         "risks": [],
         "followUps": [],
+        "suggestions": [],
+        "approaches": [],
+        "guide": [],
         "workflowSteps": [],
-        "mindMap": {
-            "title": "Meeting Mind Map",
-            "nodes": [],
-        },
-        "summary": "",
+        "categorySpecificOutput": {},
+        "coverageCheck": {},
+        "mindMap": {"title": "Audio Mind Map", "nodes": []},
     }
 
 
 def safe_json_parse(text: Any) -> Dict[str, Any]:
-    empty_result = empty_meeting_analysis()
+    parsed = parse_json_object(text)
+    if not isinstance(parsed, dict):
+        return empty_meeting_analysis()
 
+    if isinstance(parsed.get("result"), dict):
+        parsed = parsed["result"]
+    if isinstance(parsed.get("analysis"), dict):
+        parsed = parsed["analysis"]
+    if isinstance(parsed.get("meetingAnalysis"), dict):
+        parsed = parsed["meetingAnalysis"]
+
+    return normalize_analysis_result(parsed)
+
+
+def parse_json_object(text: Any) -> Dict[str, Any]:
     if text is None:
-        return empty_result
+        return {}
 
     cleaned = str(text).strip()
-
     if not cleaned:
-        return empty_result
+        return {}
 
     json_text = extract_json_object(cleaned)
-
     if not json_text:
-        return empty_result
+        return {}
 
     try:
         data = json.loads(json_text)
     except json.JSONDecodeError:
-        repaired = repair_common_json_issues(json_text)
-
         try:
-            data = json.loads(repaired)
+            data = json.loads(repair_common_json_issues(json_text))
         except json.JSONDecodeError:
-            return empty_result
+            return {}
 
-    if not isinstance(data, dict):
-        return empty_result
+    return data if isinstance(data, dict) else {}
 
-    if isinstance(data.get("result"), dict):
-        data = data["result"]
 
-    if isinstance(data.get("analysis"), dict):
-        data = data["analysis"]
+def normalize_analysis_result(data: Dict[str, Any]) -> Dict[str, Any]:
+    result = empty_meeting_analysis()
 
-    if isinstance(data.get("meetingAnalysis"), dict):
-        data = data["meetingAnalysis"]
+    category = str(data.get("audioCategory") or data.get("audio_category") or result["audioCategory"]).strip()
+    if category not in VALID_AUDIO_CATEGORIES:
+        category = "general_conversation"
 
-    meeting_title = str(
-        data.get("meetingTitle")
-        or data.get("meeting_title")
-        or data.get("title")
-        or ""
-    ).strip()
+    try:
+        confidence = float(data.get("categoryConfidence") or data.get("category_confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
 
-    overview = clean_text_field(data.get("overview", ""))
-    summary = clean_text_field(data.get("summary", ""))
+    result["audioCategory"] = category
+    result["categoryLabel"] = str(data.get("categoryLabel") or data.get("category_label") or category_label_for(category)).strip()
+    result["categoryConfidence"] = max(0.0, min(confidence, 1.0))
+    result["classificationReason"] = clean_text_field(data.get("classificationReason") or data.get("classification_reason") or "")
+    result["meetingTitle"] = clean_generated_title(str(data.get("meetingTitle") or data.get("meeting_title") or data.get("title") or ""))
+    result["overview"] = clean_text_field(data.get("overview", ""))
+    result["summary"] = clean_text_field(data.get("summary", ""))
 
-    if looks_like_json(overview):
-        overview = ""
+    if looks_like_json(result["overview"]):
+        result["overview"] = ""
+    if looks_like_json(result["summary"]):
+        result["summary"] = ""
 
-    if looks_like_json(summary):
-        summary = ""
+    result["keyPoints"] = normalize_text_items(data.get("keyPoints") or data.get("key_points") or data.get("highlights") or [], "key")
+    result["topics"] = normalize_text_items(data.get("topics") or data.get("keyTopics") or data.get("key_topics") or [], "topic")
+    result["discussionPoints"] = normalize_discussion_points(data.get("discussionPoints") or data.get("discussion_points") or [])
+    result["decisions"] = normalize_text_items(data.get("decisions") or data.get("decisionsTaken") or data.get("decision_points") or [], "decision")
+    result["actionItems"] = normalize_action_items(data.get("actionItems") or data.get("action_items") or data.get("tasks") or data.get("nextActions") or [])
+    result["problemStatements"] = normalize_text_items(data.get("problemStatements") or data.get("problem_statements") or data.get("problems") or data.get("challenges") or [], "problem")
+    result["solutions"] = normalize_solution_items(data.get("solutions") or data.get("solutionStatements") or data.get("solution_statements") or [])
+    result["risks"] = normalize_text_items(data.get("risks") or data.get("concerns") or data.get("blockers") or [], "risk")
+    result["followUps"] = normalize_text_items(data.get("followUps") or data.get("follow_ups") or data.get("followups") or [], "followup")
+    result["suggestions"] = normalize_text_items(data.get("suggestions") or data.get("recommendations") or [], "suggestion")
+    result["approaches"] = normalize_text_items(data.get("approaches") or data.get("approach") or [], "approach")
+    result["guide"] = normalize_text_items(data.get("guide") or data.get("practicalGuide") or data.get("studyGuide") or [], "guide")
+    result["workflowSteps"] = normalize_workflow_steps(data.get("workflowSteps") or data.get("workflow_steps") or data.get("steps") or [])
+    result["categorySpecificOutput"] = normalize_dynamic_map(data.get("categorySpecificOutput") or data.get("category_specific_output") or {})
+    result["coverageCheck"] = normalize_dynamic_map(data.get("coverageCheck") or data.get("coverage_check") or {})
+    result["mindMap"] = normalize_mind_map(data.get("mindMap") or data.get("mind_map") or {})
 
-    if not overview and summary:
-        overview = summary
+    return result
 
-    if not summary and overview:
-        summary = overview
 
-    topics = normalize_text_items(
-        data.get("topics")
-        or data.get("keyTopics")
-        or data.get("key_topics")
-        or [],
-        id_prefix="topic",
-    )
+def ensure_minimum_analysis(result: Dict[str, Any], transcript_text: str) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        result = empty_meeting_analysis()
 
-    discussion_points = normalize_discussion_points(
-        data.get("discussionPoints")
-        or data.get("discussion_points")
-        or data.get("keyPoints")
-        or data.get("key_points")
-        or []
-    )
+    normalized = normalize_analysis_result(result)
+    transcript_text = str(transcript_text or "").strip()
 
-    decisions = normalize_text_items(
-        data.get("decisions")
-        or data.get("decisionsTaken")
-        or data.get("decision_points")
-        or [],
-        id_prefix="decision",
-    )
+    if not normalized["overview"]:
+        normalized["overview"] = generate_overview_fallback(transcript_text, normalized["summary"])
+    if not normalized["summary"]:
+        normalized["summary"] = generate_summary_fallback(transcript_text, normalized["overview"])
+    if not normalized["meetingTitle"]:
+        normalized["meetingTitle"] = generate_title_from_analysis(normalized, transcript_text)
+    if not normalized["mindMap"].get("nodes"):
+        normalized["mindMap"] = build_mind_map_from_analysis(normalized)
 
-    action_items = normalize_action_items(
-        data.get("actionItems")
-        or data.get("action_items")
-        or data.get("tasks")
-        or data.get("nextActions")
-        or []
-    )
+    return remove_empty_analysis_fields(normalized)
 
-    problem_statements = normalize_text_items(
-        data.get("problemStatements")
-        or data.get("problem_statements")
-        or data.get("problems")
-        or data.get("challenges")
-        or [],
-        id_prefix="problem",
-    )
 
-    solutions = normalize_solution_items(
-        data.get("solutions")
-        or data.get("solutionStatements")
-        or data.get("solution_statements")
-        or []
-    )
+def fallback_analysis_from_transcript(
+    transcript_text: str,
+    classification: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    classification = classification or default_classification()
+    transcript_text = str(transcript_text or "").strip()
 
-    risks = normalize_text_items(
-        data.get("risks")
-        or data.get("concerns")
-        or data.get("blockers")
-        or [],
-        id_prefix="risk",
-    )
+    if not transcript_text:
+        result = empty_meeting_analysis()
+        result.update(classification)
+        result["meetingTitle"] = "Audio Analysis Unavailable"
+        result["overview"] = "No clear speech transcript could be generated from this audio. Please check the recording quality and try again."
+        result["summary"] = "No reliable summary could be generated because the transcript was empty or unclear."
+        result["risks"] = [{"id": "risk_1", "title": "Recording Quality Issue", "description": "The uploaded audio may be empty, unclear, too short, or unsupported."}]
+        result["mindMap"] = {"title": "Audio Mind Map", "nodes": [{"id": "node_1", "label": "Audio analysis unavailable", "children": []}]}
+        return result
 
-    follow_ups = normalize_text_items(
-        data.get("followUps")
-        or data.get("follow_ups")
-        or data.get("followups")
-        or data.get("next_steps")
-        or [],
-        id_prefix="followup",
-    )
+    result = empty_meeting_analysis()
+    result.update(classification)
+    excerpt = make_excerpt(transcript_text, max_chars=700)
+    result["meetingTitle"] = generate_title_from_text(transcript_text)
+    result["overview"] = f"The audio was transcribed successfully. This fallback overview is based directly on the transcript excerpt: {excerpt}"
+    result["summary"] = "The transcript was captured, but the structured AI analysis response was not reliable enough to extract every section. Please review the transcript for exact details."
+    result["keyPoints"] = [{"id": "key_1", "title": "Transcript Captured", "description": excerpt}]
+    result["mindMap"] = {"title": "Audio Mind Map", "nodes": [{"id": "node_1", "label": result["meetingTitle"], "children": []}]}
+    return result
 
-    workflow_steps = normalize_workflow_steps(
-        data.get("workflowSteps")
-        or data.get("workflow_steps")
-        or data.get("steps")
-        or []
-    )
 
-    mind_map = normalize_mind_map(
-        data.get("mindMap")
-        or data.get("mind_map")
-        or {}
-    )
+def fallback_merge_analyses(
+    chunk_results: List[Dict[str, Any]],
+    transcript_text: str,
+    classification: Dict[str, Any],
+) -> Dict[str, Any]:
+    merged = empty_meeting_analysis()
+    merged.update(classification)
 
-    return {
-        "meetingTitle": meeting_title,
-        "overview": overview,
-        "topics": topics,
-        "discussionPoints": discussion_points,
-        "decisions": decisions,
-        "actionItems": action_items,
-        "problemStatements": problem_statements,
-        "solutions": solutions,
-        "risks": risks,
-        "followUps": follow_ups,
-        "workflowSteps": workflow_steps,
-        "mindMap": mind_map,
-        "summary": summary,
-    }
+    for item in chunk_results:
+        normalized = ensure_minimum_analysis(item, "")
+        for key in ["keyPoints", "topics", "discussionPoints", "decisions", "actionItems", "problemStatements", "solutions", "risks", "followUps", "suggestions", "approaches", "guide", "workflowSteps"]:
+            existing = merged.get(key, [])
+            if isinstance(existing, list):
+                existing.extend(normalized.get(key, []))
+                merged[key] = existing
+
+        if normalized.get("overview"):
+            merged["overview"] = (merged["overview"] + "\n" + normalized["overview"]).strip()
+        if normalized.get("summary"):
+            merged["summary"] = (merged["summary"] + "\n" + normalized["summary"]).strip()
+
+        merged["categorySpecificOutput"] = merge_dynamic_maps(merged.get("categorySpecificOutput", {}), normalized.get("categorySpecificOutput", {}))
+        merged["coverageCheck"] = merge_dynamic_maps(merged.get("coverageCheck", {}), normalized.get("coverageCheck", {}))
+
+    return ensure_minimum_analysis(merged, transcript_text)
+
+
+def remove_empty_analysis_fields(result: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = dict(result)
+
+    for key in ["keyPoints", "topics", "discussionPoints", "decisions", "actionItems", "problemStatements", "solutions", "risks", "followUps", "suggestions", "approaches", "guide", "workflowSteps"]:
+        value = cleaned.get(key, [])
+        if isinstance(value, list):
+            cleaned[key] = [item for item in value if has_displayable_value(item)]
+
+    cleaned["categorySpecificOutput"] = normalize_dynamic_map(cleaned.get("categorySpecificOutput", {}))
+    cleaned["coverageCheck"] = normalize_dynamic_map(cleaned.get("coverageCheck", {}))
+
+    return cleaned
+
+
+def merge_dynamic_maps(first: Any, second: Any) -> Dict[str, Any]:
+    result = normalize_dynamic_map(first)
+    other = normalize_dynamic_map(second)
+
+    for key, value in other.items():
+        if key not in result or not has_displayable_value(result[key]):
+            result[key] = value
+        elif isinstance(result[key], list) and isinstance(value, list):
+            result[key].extend(value)
+        elif isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = merge_dynamic_maps(result[key], value)
+
+    return normalize_dynamic_map(result)
+
+
+def normalize_dynamic_map(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    cleaned: Dict[str, Any] = {}
+    for key, item in value.items():
+        cleaned_item = normalize_dynamic_value(item)
+        if has_displayable_value(cleaned_item):
+            cleaned[str(key)] = cleaned_item
+
+    return cleaned
+
+
+def normalize_dynamic_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = clean_text_field(value)
+        if text.lower().strip() in {"n/a", "na", "none", "not applicable", "not discussed", "no data", "not mentioned"}:
+            return ""
+        return text
+    if isinstance(value, list):
+        cleaned_list = [normalize_dynamic_value(item) for item in value]
+        return [item for item in cleaned_list if has_displayable_value(item)]
+    if isinstance(value, dict):
+        return normalize_dynamic_map(value)
+    return value
+
+
+def has_displayable_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(has_displayable_value(item) for item in value)
+    if isinstance(value, dict):
+        return any(has_displayable_value(item) for item in value.values())
+    return bool(str(value).strip())
+
+
+def normalize_discussion_points(value: Any) -> List[Dict[str, Any]]:
+    items = normalize_list_of_dicts(value)
+    normalized = []
+    seen = set()
+
+    for item in items:
+        title = clean_text_field(item.get("title") or item.get("heading") or "")
+        description = clean_text_field(item.get("description") or item.get("details") or item.get("text") or "")
+        if not title and not description:
+            continue
+
+        status = str(item.get("status", "pending") or "pending").lower().strip()
+        if status not in {"done", "pending", "not_done", "in_progress"}:
+            status = "pending"
+
+        key = f"{title.lower()}::{description.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        normalized.append({
+            "id": f"point_{len(normalized) + 1}",
+            "title": title or f"Point {len(normalized) + 1}",
+            "description": description,
+            "status": status,
+        })
+
+    return normalized
+
+
+def normalize_text_items(value: Any, id_prefix: str) -> List[Dict[str, Any]]:
+    items = normalize_list_of_dicts(value)
+    normalized = []
+    seen = set()
+
+    for item in items:
+        title = clean_text_field(item.get("title") or item.get("heading") or item.get("name") or "")
+        description = clean_text_field(item.get("description") or item.get("details") or item.get("text") or item.get("value") or "")
+        if not title and not description:
+            continue
+
+        key = f"{title.lower()}::{description.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        normalized.append({
+            "id": f"{id_prefix}_{len(normalized) + 1}",
+            "title": title or f"{id_prefix.title()} {len(normalized) + 1}",
+            "description": description,
+        })
+
+    return normalized
+
+
+def normalize_action_items(value: Any) -> List[Dict[str, Any]]:
+    items = normalize_list_of_dicts(value)
+    normalized = []
+    seen = set()
+
+    for item in items:
+        title = clean_text_field(item.get("title") or item.get("task") or item.get("heading") or "")
+        description = clean_text_field(item.get("description") or item.get("details") or item.get("text") or "")
+        if not title and not description:
+            continue
+
+        owner = clean_text_field(item.get("owner") or item.get("assignedTo") or "Not specified") or "Not specified"
+        deadline = clean_text_field(item.get("deadline") or item.get("dueDate") or "Not specified") or "Not specified"
+        status = str(item.get("status", "pending") or "pending").lower().strip()
+        if status not in {"done", "pending", "not_done", "in_progress"}:
+            status = "pending"
+
+        key = f"{title.lower()}::{description.lower()}::{owner.lower()}::{deadline.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        normalized.append({
+            "id": f"action_{len(normalized) + 1}",
+            "title": title or f"Action {len(normalized) + 1}",
+            "description": description,
+            "owner": owner,
+            "deadline": deadline,
+            "status": status,
+        })
+
+    return normalized
+
+
+def normalize_solution_items(value: Any) -> List[Dict[str, Any]]:
+    items = normalize_list_of_dicts(value)
+    normalized = []
+    seen = set()
+
+    for item in items:
+        title = clean_text_field(item.get("title") or item.get("heading") or "")
+        description = clean_text_field(item.get("description") or item.get("details") or item.get("text") or "")
+        if not title and not description:
+            continue
+
+        related = clean_text_field(item.get("relatedProblemId") or item.get("related_problem_id") or "")
+        key = f"{title.lower()}::{description.lower()}::{related.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        normalized.append({
+            "id": f"solution_{len(normalized) + 1}",
+            "title": title or f"Solution {len(normalized) + 1}",
+            "description": description,
+            "relatedProblemId": related,
+        })
+
+    return normalized
+
+
+def normalize_workflow_steps(value: Any) -> List[Dict[str, Any]]:
+    items = normalize_list_of_dicts(value)
+    normalized = []
+
+    for item in items:
+        title = clean_text_field(item.get("title") or item.get("heading") or "")
+        description = clean_text_field(item.get("description") or item.get("details") or item.get("text") or "")
+        if not title and not description:
+            continue
+
+        normalized.append({
+            "step": len(normalized) + 1,
+            "title": title or f"Step {len(normalized) + 1}",
+            "description": description,
+        })
+
+    return normalized
+
+
+def normalize_list_of_dicts(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    items = []
+    for item in value:
+        if isinstance(item, str):
+            text = clean_text_field(item)
+            if text:
+                items.append({"description": text})
+        elif isinstance(item, dict):
+            items.append(dict(item))
+
+    return items
+
+
+def normalize_mind_map(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"title": "Audio Mind Map", "nodes": []}
+
+    title = clean_text_field(value.get("title") or "Audio Mind Map") or "Audio Mind Map"
+    nodes = normalize_mind_map_nodes(value.get("nodes", []))
+    return {"title": title, "nodes": nodes}
+
+
+def normalize_mind_map_nodes(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    nodes = []
+    for item in value:
+        if isinstance(item, str):
+            label = clean_text_field(item)
+            children = []
+        elif isinstance(item, dict):
+            label = clean_text_field(item.get("label") or item.get("title") or "")
+            children = normalize_mind_map_nodes(item.get("children", []))
+        else:
+            continue
+
+        if not label:
+            continue
+
+        nodes.append({
+            "id": f"node_{len(nodes) + 1}",
+            "label": label,
+            "children": children,
+        })
+
+    return nodes
+
+
+def build_mind_map_from_analysis(result: Dict[str, Any]) -> Dict[str, Any]:
+    groups = [
+        ("Key Topics", result.get("topics", [])),
+        ("Key Points", result.get("keyPoints", [])),
+        ("Decisions", result.get("decisions", [])),
+        ("Action Items", result.get("actionItems", [])),
+        ("Problems", result.get("problemStatements", [])),
+        ("Solutions", result.get("solutions", [])),
+        ("Guide", result.get("guide", [])),
+    ]
+
+    nodes = []
+    for group_label, items in groups:
+        if not isinstance(items, list) or not items:
+            continue
+        children = []
+        for item in items[:6]:
+            if not isinstance(item, dict):
+                continue
+            label = clean_text_field(item.get("title") or item.get("description") or "")
+            if label:
+                children.append({"id": f"node_{len(nodes) + 1}_{len(children) + 1}", "label": label, "children": []})
+        if children:
+            nodes.append({"id": f"node_{len(nodes) + 1}", "label": group_label, "children": children})
+
+    return {"title": "Audio Mind Map", "nodes": nodes}
+
+
+def is_analysis_empty(result: Dict[str, Any]) -> bool:
+    if not isinstance(result, dict):
+        return True
+    for key in ["overview", "summary", "meetingTitle", "keyPoints", "topics", "discussionPoints", "decisions", "actionItems", "problemStatements", "solutions", "risks", "followUps", "suggestions", "approaches", "guide", "workflowSteps", "categorySpecificOutput"]:
+        if has_displayable_value(result.get(key)):
+            return False
+    return True
 
 
 def extract_json_object(text: str) -> str:
     cleaned = str(text or "").strip()
-
     if not cleaned:
         return ""
 
-    cleaned = cleaned.replace("```json", "")
-    cleaned = cleaned.replace("```JSON", "")
-    cleaned = cleaned.replace("```", "")
-    cleaned = cleaned.strip()
+    cleaned = cleaned.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
 
     for start_index, char in enumerate(cleaned):
         if char != "{":
             continue
-
         candidate = extract_balanced_json_from_index(cleaned, start_index)
-
-        if not candidate:
-            continue
-
-        if (
-            "overview" in candidate
-            or "discussionPoints" in candidate
-            or "discussion_points" in candidate
-            or "summary" in candidate
-            or "mindMap" in candidate
-            or "meetingTitle" in candidate
-            or "topics" in candidate
-            or "actionItems" in candidate
-            or "decisions" in candidate
-        ):
+        if candidate:
             return candidate.strip()
 
     first_brace = cleaned.find("{")
     last_brace = cleaned.rfind("}")
-
-    if first_brace == -1 or last_brace == -1 or last_brace <= first_brace:
+    if first_brace == -1 or last_brace <= first_brace:
         return ""
-
     return cleaned[first_brace:last_brace + 1].strip()
 
 
@@ -1304,896 +1783,115 @@ def extract_balanced_json_from_index(text: str, start_index: int) -> str:
 
     for index in range(start_index, len(text)):
         char = text[index]
-
         if escape:
             escape = False
             continue
-
         if char == "\\":
             escape = True
             continue
-
         if char == '"':
             in_string = not in_string
             continue
-
         if in_string:
             continue
-
         if char == "{":
             depth += 1
-
         elif char == "}":
             depth -= 1
-
             if depth == 0:
                 return text[start_index:index + 1]
-
     return ""
 
 
 def repair_common_json_issues(text: str) -> str:
     repaired = str(text or "").strip()
-
-    repaired = repaired.replace("\u201c", '"')
-    repaired = repaired.replace("\u201d", '"')
-    repaired = repaired.replace("\u2018", "'")
-    repaired = repaired.replace("\u2019", "'")
-
-    repaired = repaired.replace(",\n}", "\n}")
-    repaired = repaired.replace(",\n]", "\n]")
-    repaired = repaired.replace(",}", "}")
-    repaired = repaired.replace(",]", "]")
-
+    repaired = repaired.replace("\u201c", '"').replace("\u201d", '"')
+    repaired = repaired.replace("\u2018", "'").replace("\u2019", "'")
+    repaired = repaired.replace(",\n}", "\n}").replace(",\n]", "\n]")
+    repaired = repaired.replace(",}", "}").replace(",]", "]")
     return repaired
 
 
 def clean_text_field(value: Any) -> str:
     cleaned = str(value or "").strip()
-
     if not cleaned:
         return ""
-
-    cleaned = cleaned.replace("```json", "")
-    cleaned = cleaned.replace("```JSON", "")
-    cleaned = cleaned.replace("```", "")
-    cleaned = cleaned.strip()
-
+    cleaned = cleaned.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
+    if cleaned.lower().strip() in {"n/a", "na", "none", "not applicable", "not discussed", "no data", "not mentioned"}:
+        return ""
     return cleaned
 
 
 def looks_like_json(value: str) -> bool:
     cleaned = str(value or "").strip()
-
     if not cleaned:
         return False
-
-    return (
-        cleaned.startswith("{")
-        or cleaned.startswith("[")
-        or '"overview"' in cleaned
-        or '"meetingTitle"' in cleaned
-        or '"topics"' in cleaned
-        or '"discussionPoints"' in cleaned
-        or '"discussion_points"' in cleaned
-        or '"decisions"' in cleaned
-        or '"actionItems"' in cleaned
-        or '"problemStatements"' in cleaned
-        or '"workflowSteps"' in cleaned
-        or '"mindMap"' in cleaned
-        or '"summary"' in cleaned
-    )
-
-
-def is_analysis_empty(result: Dict[str, Any]) -> bool:
-    if not isinstance(result, dict):
-        return True
-
-    mind_map = result.get("mindMap", {})
-
-    mind_nodes = []
-    if isinstance(mind_map, dict):
-        nodes = mind_map.get("nodes", [])
-        if isinstance(nodes, list):
-            mind_nodes = nodes
-
-    return not any(
-        [
-            str(result.get("meetingTitle", "") or "").strip(),
-            str(result.get("overview", "") or "").strip(),
-            str(result.get("summary", "") or "").strip(),
-            result.get("topics", []),
-            result.get("discussionPoints", []),
-            result.get("decisions", []),
-            result.get("actionItems", []),
-            result.get("problemStatements", []),
-            result.get("solutions", []),
-            result.get("risks", []),
-            result.get("followUps", []),
-            result.get("workflowSteps", []),
-            mind_nodes,
-        ]
-    )
-
-
-def ensure_minimum_analysis(
-    result: Dict[str, Any],
-    transcript_text: str,
-) -> Dict[str, Any]:
-    if not isinstance(result, dict):
-        result = empty_meeting_analysis()
-
-    transcript_text = str(transcript_text or "").strip()
-
-    meeting_title = str(result.get("meetingTitle", "") or "").strip()
-    overview = clean_text_field(result.get("overview", ""))
-    summary = clean_text_field(result.get("summary", ""))
-
-    if looks_like_json(overview):
-        overview = ""
-
-    if looks_like_json(summary):
-        summary = ""
-
-    topics = normalize_text_items(
-        result.get("topics", []),
-        id_prefix="topic",
-    )
-
-    discussion_points = normalize_discussion_points(
-        result.get("discussionPoints", [])
-    )
-
-    decisions = normalize_text_items(
-        result.get("decisions", []),
-        id_prefix="decision",
-    )
-
-    action_items = normalize_action_items(
-        result.get("actionItems", [])
-    )
-
-    problem_statements = normalize_text_items(
-        result.get("problemStatements", []),
-        id_prefix="problem",
-    )
-
-    solutions = normalize_solution_items(
-        result.get("solutions", [])
-    )
-
-    risks = normalize_text_items(
-        result.get("risks", []),
-        id_prefix="risk",
-    )
-
-    follow_ups = normalize_text_items(
-        result.get("followUps", []),
-        id_prefix="followup",
-    )
-
-    workflow_steps = normalize_workflow_steps(
-        result.get("workflowSteps", [])
-    )
-
-    mind_map = normalize_mind_map(
-        result.get("mindMap", {})
-    )
-
-    if not meeting_title:
-        meeting_title = generate_title_from_text(
-            overview or summary or transcript_text
-        )
-
-    if not overview:
-        overview = generate_overview_fallback(transcript_text, summary)
-
-    if not summary:
-        summary = generate_summary_fallback(transcript_text, overview)
-
-    if not discussion_points:
-        discussion_points = [
-            {
-                "id": "point_1",
-                "title": "Captured Meeting Discussion",
-                "description": generate_discussion_fallback(transcript_text, overview, summary),
-                "status": "pending",
-            }
-        ]
-
-    if not topics:
-        topics = normalize_text_items(
-            [
-                {
-                    "title": meeting_title,
-                    "description": overview,
-                }
-            ],
-            id_prefix="topic",
-        )
-
-    if not has_mind_map_nodes(mind_map):
-        mind_map = build_mind_map_from_analysis(
-            topics=topics,
-            decisions=decisions,
-            action_items=action_items,
-            risks=risks,
-            follow_ups=follow_ups,
-            discussion_points=discussion_points,
-            problem_statements=problem_statements,
-            solutions=solutions,
-            workflow_steps=workflow_steps,
-        )
-
-    return {
-        "meetingTitle": meeting_title,
-        "overview": overview,
-        "topics": topics,
-        "discussionPoints": discussion_points,
-        "decisions": decisions,
-        "actionItems": action_items,
-        "problemStatements": problem_statements,
-        "solutions": solutions,
-        "risks": risks,
-        "followUps": follow_ups,
-        "workflowSteps": workflow_steps,
-        "mindMap": mind_map,
-        "summary": summary,
-    }
-
-
-def fallback_analysis_from_transcript(transcript_text: str) -> Dict[str, Any]:
-    transcript_text = str(transcript_text or "").strip()
-
-    if not transcript_text:
-        return {
-            "meetingTitle": "Meeting Audio Analysis",
-            "overview": "No clear speech transcript could be generated from this audio. Please check the recording quality and try again.",
-            "topics": [],
-            "discussionPoints": [
-                {
-                    "id": "point_1",
-                    "title": "Audio Could Not Be Clearly Analyzed",
-                    "description": "The system could not generate a reliable transcript from the uploaded meeting audio.",
-                    "status": "pending",
-                }
-            ],
-            "decisions": [],
-            "actionItems": [],
-            "problemStatements": [],
-            "solutions": [],
-            "risks": [
-                {
-                    "id": "risk_1",
-                    "title": "Recording Quality Issue",
-                    "description": "The uploaded audio may be empty, unclear, too short, or unsupported.",
-                }
-            ],
-            "followUps": [],
-            "workflowSteps": [],
-            "mindMap": {
-                "title": "Meeting Mind Map",
-                "nodes": [
-                    {
-                        "id": "node_1",
-                        "label": "Audio analysis unavailable",
-                        "children": [],
-                    }
-                ],
-            },
-            "summary": "No reliable meeting summary could be generated because the transcript was empty or unclear.",
-        }
-
-    title = generate_title_from_text(transcript_text)
-    excerpt = make_excerpt(transcript_text, max_chars=700)
-
-    return {
-        "meetingTitle": title,
-        "overview": (
-            "The meeting audio was transcribed successfully. "
-            "A complete structured analysis could not be generated with high confidence, "
-            "so this overview is based directly on the transcript excerpt: "
-            f"{excerpt}"
-        ),
-        "topics": [
-            {
-                "id": "topic_1",
-                "title": title,
-                "description": excerpt,
-            }
-        ],
-        "discussionPoints": [
-            {
-                "id": "point_1",
-                "title": "Main Meeting Discussion",
-                "description": excerpt,
-                "status": "pending",
-            }
-        ],
-        "decisions": [],
-        "actionItems": [],
-        "problemStatements": [],
-        "solutions": [],
-        "risks": [],
-        "followUps": [],
-        "workflowSteps": [],
-        "mindMap": {
-            "title": "Meeting Mind Map",
-            "nodes": [
-                {
-                    "id": "node_1",
-                    "label": "Main Meeting Discussion",
-                    "children": [],
-                }
-            ],
-        },
-        "summary": (
-            "The transcript was captured, but the AI analysis response was not reliable enough "
-            "to extract every section. Please review the transcript for exact details."
-        ),
-    }
+    return cleaned.startswith("{") or cleaned.startswith("[") or '"overview"' in cleaned or '"discussionPoints"' in cleaned or '"audioCategory"' in cleaned
 
 
 def generate_title_from_text(text: str) -> str:
-    cleaned = str(text or "").strip()
-
+    cleaned = " ".join(str(text or "").strip().split())
     if not cleaned:
-        return "Meeting Notes"
+        return "Audio Notes"
 
-    cleaned = " ".join(cleaned.split())
-    first_sentence = cleaned.split(".")[0].strip()
+    cleaned = cleaned.replace("Speaker:", "").strip()
+    sentence_parts = [part.strip() for part in cleaned.replace("?", ".").replace("!", ".").split(".") if part.strip()]
 
-    if not first_sentence:
-        first_sentence = cleaned
+    candidate = ""
+    for part in sentence_parts[:5]:
+        words = [word for word in part.split() if len(word) > 2]
+        if len(words) >= 4:
+            candidate = " ".join(words[:8])
+            break
 
-    first_sentence = first_sentence.replace("Speaker:", "").strip()
+    if not candidate:
+        words = [word for word in cleaned.split() if len(word) > 2]
+        candidate = " ".join(words[:8])
 
-    words = first_sentence.split()
-
-    if len(words) >= 4:
-        title = " ".join(words[:9])
-    else:
-        title = " ".join(words)
-
-    title = title.strip(" ,:-")
-
-    if not title:
-        return "Meeting Notes"
-
-    if len(title) > 70:
-        title = title[:67].strip() + "..."
-
-    return title
+    return clean_generated_title(candidate) or "Audio Notes"
 
 
 def generate_overview_fallback(transcript_text: str, summary: str) -> str:
     if summary and not looks_like_json(summary):
         return summary
-
     transcript_text = str(transcript_text or "").strip()
-
     if transcript_text:
-        return (
-            "The meeting transcript was captured successfully. "
-            f"Key transcript excerpt: {make_excerpt(transcript_text, max_chars=600)}"
-        )
-
-    return "No clear overview could be generated from this meeting audio."
+        return f"The audio transcript was captured successfully. Key excerpt: {make_excerpt(transcript_text, max_chars=600)}"
+    return "No clear overview could be generated from this audio."
 
 
 def generate_summary_fallback(transcript_text: str, overview: str) -> str:
     if overview and not looks_like_json(overview):
         return overview
-
     transcript_text = str(transcript_text or "").strip()
-
     if transcript_text:
-        return (
-            "The meeting was transcribed, but a detailed structured summary could not be generated. "
-            f"Transcript excerpt: {make_excerpt(transcript_text, max_chars=600)}"
-        )
-
-    return "No clear summary could be generated from this meeting audio."
-
-
-def generate_discussion_fallback(
-    transcript_text: str,
-    overview: str,
-    summary: str,
-) -> str:
-    for value in [overview, summary, transcript_text]:
-        cleaned = str(value or "").strip()
-
-        if cleaned and not looks_like_json(cleaned):
-            return make_excerpt(cleaned, max_chars=600)
-
-    return "The meeting was processed, but no clear discussion points were extracted."
+        return f"The audio was transcribed, but a detailed structured summary could not be generated. Transcript excerpt: {make_excerpt(transcript_text, max_chars=600)}"
+    return "No clear summary could be generated from this audio."
 
 
 def make_excerpt(text: str, max_chars: int = 600) -> str:
     cleaned = " ".join(str(text or "").split())
-
     if len(cleaned) <= max_chars:
         return cleaned
-
     return cleaned[:max_chars].rsplit(" ", 1)[0].strip() + "..."
 
 
-def has_mind_map_nodes(mind_map: Dict[str, Any]) -> bool:
-    if not isinstance(mind_map, dict):
-        return False
+def make_transcript_context(text: str, max_chars: int = 9000) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= max_chars:
+        return cleaned
 
-    nodes = mind_map.get("nodes", [])
+    part_len = max_chars // 3
+    start = cleaned[:part_len]
+    middle_start = max(0, (len(cleaned) // 2) - (part_len // 2))
+    middle = cleaned[middle_start:middle_start + part_len]
+    end = cleaned[-part_len:]
 
-    return isinstance(nodes, list) and len(nodes) > 0
+    return f"START:\n{start}\n\nMIDDLE:\n{middle}\n\nEND:\n{end}"
 
 
-def build_mind_map_from_analysis(
-    topics: List[Dict[str, Any]],
-    decisions: List[Dict[str, Any]],
-    action_items: List[Dict[str, Any]],
-    risks: List[Dict[str, Any]],
-    follow_ups: List[Dict[str, Any]],
-    discussion_points: List[Dict[str, Any]],
-    problem_statements: List[Dict[str, Any]],
-    solutions: List[Dict[str, Any]],
-    workflow_steps: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    nodes = []
-
-    if topics:
-        nodes.append(
-            {
-                "id": "node_topics",
-                "label": "Key Topics",
-                "children": [
-                    {
-                        "id": f"node_topic_{index + 1}",
-                        "label": str(item.get("title") or f"Topic {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(topics[:6])
-                ],
-            }
-        )
-
-    if decisions:
-        nodes.append(
-            {
-                "id": "node_decisions",
-                "label": "Decisions",
-                "children": [
-                    {
-                        "id": f"node_decision_{index + 1}",
-                        "label": str(item.get("title") or f"Decision {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(decisions[:6])
-                ],
-            }
-        )
-
-    if action_items:
-        nodes.append(
-            {
-                "id": "node_actions",
-                "label": "Action Items",
-                "children": [
-                    {
-                        "id": f"node_action_{index + 1}",
-                        "label": str(item.get("title") or f"Action {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(action_items[:6])
-                ],
-            }
-        )
-
-    if discussion_points:
-        nodes.append(
-            {
-                "id": "node_discussions",
-                "label": "Discussion Points",
-                "children": [
-                    {
-                        "id": f"node_discussion_{index + 1}",
-                        "label": str(item.get("title") or f"Point {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(discussion_points[:6])
-                ],
-            }
-        )
-
-    if problem_statements:
-        nodes.append(
-            {
-                "id": "node_problems",
-                "label": "Problems & Challenges",
-                "children": [
-                    {
-                        "id": f"node_problem_{index + 1}",
-                        "label": str(item.get("title") or f"Problem {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(problem_statements[:6])
-                ],
-            }
-        )
-
-    if solutions:
-        nodes.append(
-            {
-                "id": "node_solutions",
-                "label": "Solutions & Approach",
-                "children": [
-                    {
-                        "id": f"node_solution_{index + 1}",
-                        "label": str(item.get("title") or f"Solution {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(solutions[:6])
-                ],
-            }
-        )
-
-    if risks:
-        nodes.append(
-            {
-                "id": "node_risks",
-                "label": "Risks & Concerns",
-                "children": [
-                    {
-                        "id": f"node_risk_{index + 1}",
-                        "label": str(item.get("title") or f"Risk {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(risks[:6])
-                ],
-            }
-        )
-
-    if follow_ups:
-        nodes.append(
-            {
-                "id": "node_followups",
-                "label": "Follow-ups",
-                "children": [
-                    {
-                        "id": f"node_followup_{index + 1}",
-                        "label": str(item.get("title") or f"Follow-up {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(follow_ups[:6])
-                ],
-            }
-        )
-
-    if workflow_steps:
-        nodes.append(
-            {
-                "id": "node_workflow",
-                "label": "Workflow Steps",
-                "children": [
-                    {
-                        "id": f"node_workflow_{index + 1}",
-                        "label": str(item.get("title") or f"Step {index + 1}"),
-                        "children": [],
-                    }
-                    for index, item in enumerate(workflow_steps[:6])
-                ],
-            }
-        )
-
-    if not nodes:
-        nodes = [
-            {
-                "id": "node_1",
-                "label": "Meeting Discussion",
-                "children": [],
-            }
-        ]
-
-    return {
-        "title": "Meeting Mind Map",
-        "nodes": nodes,
-    }
-
-
-def normalize_discussion_points(value: Any) -> List[Dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-
-    normalized_points = []
-
-    for index, point in enumerate(value):
-        if isinstance(point, str):
-            text = point.strip()
-
-            if not text:
-                continue
-
-            normalized_points.append(
-                {
-                    "id": f"point_{index + 1}",
-                    "title": f"Point {index + 1}",
-                    "description": text,
-                    "status": "pending",
-                }
-            )
-            continue
-
-        if not isinstance(point, dict):
-            continue
-
-        status = str(point.get("status", "pending")).lower().strip()
-
-        if status not in ["done", "pending", "not_done", "in_progress"]:
-            status = "pending"
-
-        title = str(point.get("title") or f"Point {index + 1}").strip()
-        description = str(point.get("description") or "").strip()
-
-        if not title and not description:
-            continue
-
-        normalized_points.append(
-            {
-                "id": str(point.get("id") or f"point_{index + 1}"),
-                "title": title or f"Point {index + 1}",
-                "description": description,
-                "status": status,
-            }
-        )
-
-    return normalized_points
-
-
-def normalize_text_items(value: Any, id_prefix: str) -> List[Dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-
-    normalized_items = []
-    seen = set()
-
-    for index, item in enumerate(value):
-        if isinstance(item, str):
-            title = f"{id_prefix.title()} {len(normalized_items) + 1}"
-            description = item.strip()
-        elif isinstance(item, dict):
-            title = str(item.get("title") or "").strip()
-            description = str(item.get("description") or "").strip()
-        else:
-            continue
-
-        if not title and not description:
-            continue
-
-        if not title:
-            title = f"{id_prefix.title()} {len(normalized_items) + 1}"
-
-        key = f"{title.lower()}::{description.lower()}"
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        normalized_items.append(
-            {
-                "id": f"{id_prefix}_{len(normalized_items) + 1}",
-                "title": title,
-                "description": description,
-            }
-        )
-
-    return normalized_items
-
-
-def normalize_action_items(value: Any) -> List[Dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-
-    normalized_items = []
-    seen = set()
-
-    for index, item in enumerate(value):
-        if isinstance(item, str):
-            title = f"Action {len(normalized_items) + 1}"
-            description = item.strip()
-            owner = "Not specified"
-            deadline = "Not specified"
-            status = "pending"
-        elif isinstance(item, dict):
-            title = str(item.get("title") or "").strip()
-            description = str(item.get("description") or "").strip()
-            owner = str(item.get("owner") or "Not specified").strip()
-            deadline = str(item.get("deadline") or "Not specified").strip()
-            status = str(item.get("status") or "pending").lower().strip()
-        else:
-            continue
-
-        if not title and not description:
-            continue
-
-        if status not in ["done", "pending", "not_done", "in_progress"]:
-            status = "pending"
-
-        if not title:
-            title = f"Action {len(normalized_items) + 1}"
-
-        key = f"{title.lower()}::{description.lower()}::{owner.lower()}::{deadline.lower()}::{status}"
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        normalized_items.append(
-            {
-                "id": f"action_{len(normalized_items) + 1}",
-                "title": title,
-                "description": description,
-                "owner": owner or "Not specified",
-                "deadline": deadline or "Not specified",
-                "status": status,
-            }
-        )
-
-    return normalized_items
-
-
-def normalize_solution_items(value: Any) -> List[Dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-
-    normalized_items = []
-
-    for index, item in enumerate(value):
-        if isinstance(item, str):
-            text = item.strip()
-
-            if not text:
-                continue
-
-            normalized_items.append(
-                {
-                    "id": f"solution_{index + 1}",
-                    "title": f"Solution {index + 1}",
-                    "description": text,
-                    "relatedProblemId": "",
-                }
-            )
-            continue
-
-        if not isinstance(item, dict):
-            continue
-
-        title = str(item.get("title") or "").strip()
-        description = str(item.get("description") or "").strip()
-        related_problem_id = str(item.get("relatedProblemId") or "").strip()
-
-        if not title and not description:
-            continue
-
-        normalized_items.append(
-            {
-                "id": str(item.get("id") or f"solution_{index + 1}"),
-                "title": title or f"Solution {index + 1}",
-                "description": description,
-                "relatedProblemId": related_problem_id,
-            }
-        )
-
-    return normalized_items
-
-
-def normalize_workflow_steps(value: Any) -> List[Dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-
-    normalized_steps = []
-
-    for index, item in enumerate(value):
-        if isinstance(item, str):
-            text = item.strip()
-
-            if not text:
-                continue
-
-            normalized_steps.append(
-                {
-                    "step": index + 1,
-                    "title": f"Step {index + 1}",
-                    "description": text,
-                }
-            )
-            continue
-
-        if not isinstance(item, dict):
-            continue
-
-        try:
-            step = int(item.get("step") or index + 1)
-        except Exception:
-            step = index + 1
-
-        title = str(item.get("title") or f"Step {step}").strip()
-        description = str(item.get("description") or "").strip()
-
-        if not title and not description:
-            continue
-
-        normalized_steps.append(
-            {
-                "step": step,
-                "title": title or f"Step {step}",
-                "description": description,
-            }
-        )
-
-    normalized_steps.sort(key=lambda item: item.get("step", 0))
-    return normalized_steps
-
-
-def normalize_mind_map(value: Any) -> Dict[str, Any]:
-    if not isinstance(value, dict):
-        return {
-            "title": "Meeting Mind Map",
-            "nodes": [],
-        }
-
-    title = str(value.get("title") or "Meeting Mind Map").strip()
-    nodes = value.get("nodes", [])
-
-    if not isinstance(nodes, list):
-        nodes = []
-
-    return {
-        "title": title or "Meeting Mind Map",
-        "nodes": normalize_mind_map_nodes(nodes),
-    }
-
-
-def normalize_mind_map_nodes(value: Any) -> List[Dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-
-    normalized_nodes = []
-
-    for index, node in enumerate(value):
-        if isinstance(node, str):
-            label = node.strip()
-
-            if not label:
-                continue
-
-            normalized_nodes.append(
-                {
-                    "id": f"node_{index + 1}",
-                    "label": label,
-                    "children": [],
-                }
-            )
-            continue
-
-        if not isinstance(node, dict):
-            continue
-
-        label = str(node.get("label") or "").strip()
-
-        if not label:
-            continue
-
-        children = node.get("children", [])
-
-        normalized_nodes.append(
-            {
-                "id": str(node.get("id") or f"node_{index + 1}"),
-                "label": label,
-                "children": normalize_mind_map_nodes(children),
-            }
-        )
-
-    return normalized_nodes
+def escape_prompt_text(value: Any) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', "'").replace("\n", " ").strip()
 
 
 def ask_from_transcript(transcript_text: str, question: str) -> str:
