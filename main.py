@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -835,6 +836,16 @@ CATEGORY_SPECIFIC_SCHEMAS: Dict[str, Dict[str, Any]] = {
 }
 
 
+TITLE_STOPWORDS = {
+    "about", "after", "again", "also", "audio", "because", "before", "being", "between", "could", "discussion",
+    "everyone", "first", "from", "going", "hello", "here", "into", "just", "like", "meeting", "notes", "okay",
+    "once", "only", "really", "should", "something", "speaker", "summary", "that", "their", "there", "these", "thing",
+    "this", "today", "transcript", "very", "want", "what", "when", "where", "which", "with", "would", "your",
+    "have", "will", "they", "them", "then", "than", "were", "been", "need", "time", "know", "make", "take",
+    "give", "come", "done", "said", "tell", "talk", "talking", "discuss", "discussed", "point", "points",
+}
+
+
 def default_classification() -> Dict[str, Any]:
     return {
         "audioCategory": "general_conversation",
@@ -974,6 +985,7 @@ def heuristic_classification(transcript_text: str) -> Dict[str, Any]:
     }
 
 
+
 def analyze_meeting(transcript_text: str) -> Dict[str, Any]:
     transcript_text = str(transcript_text or "").strip()
 
@@ -1010,15 +1022,38 @@ def analyze_meeting(transcript_text: str) -> Dict[str, Any]:
     analysis = ensure_minimum_analysis(analysis, transcript_text)
     analysis.update(classification)
 
+    # Final premium pass: this is the important improvement.
+    # It converts transcript-like notes into category-wise intelligence.
+    refined = refine_analysis_premium(
+        transcript_text=transcript_text,
+        draft_analysis=analysis,
+        classification=classification,
+    )
+
+    if not is_analysis_empty(refined):
+        analysis = refined
+
+    analysis.update(classification)
+    analysis = ensure_minimum_analysis(analysis, transcript_text)
+    analysis = ensure_category_specific_output(
+        analysis_result=analysis,
+        classification=classification,
+        transcript_text=transcript_text,
+    )
+    analysis = adapt_analysis_for_category(analysis, classification)
+
     title = generate_meaningful_title(
         transcript_text=transcript_text,
         analysis_result=analysis,
         classification=classification,
     )
+
     if title:
         analysis["meetingTitle"] = title
 
-    return ensure_minimum_analysis(analysis, transcript_text)
+    analysis = ensure_minimum_analysis(analysis, transcript_text)
+    analysis = adapt_analysis_for_category(analysis, classification)
+    return remove_empty_analysis_fields(analysis)
 
 
 def analyze_meeting_chunk(
@@ -1038,36 +1073,43 @@ def analyze_meeting_chunk(
     prompt = f"""
 {ENGLISH_ONLY_RULE}
 
-You are a premium audio intelligence analyst.
-The audio has been classified as: {category_label} ({category}).
+You are a premium audio intelligence analyst, not a normal transcript summarizer.
+The audio category is: {category_label} ({category}).
 
-Analyze the transcript chunk according to this category. The output must adapt to the category.
-Do not force business-meeting sections when the audio is a lecture, interview, motivational speech, podcast, complaint, or voice note.
+Your job:
+1. Understand the meaning of the audio.
+2. Convert it into useful intelligence for the category.
+3. Do NOT rewrite the transcript line by line.
+4. Do NOT make every audio look like a business meeting.
+5. Keep unsupported fields empty.
+
+For this category, follow this output style:
+{category_output_guidance(category)}
 
 Return ONLY one valid JSON object.
 
 Required JSON format:
 {{
-  "meetingTitle": "Temporary chunk title in 5 to 8 words",
+  "meetingTitle": "temporary analytical title, not copied from transcript opening",
   "audioCategory": "{category}",
   "categoryLabel": "{category_label}",
   "categoryConfidence": {classification.get('categoryConfidence', 0.65)},
   "classificationReason": "{escape_prompt_text(classification.get('classificationReason', ''))}",
-  "overview": "Category-appropriate executive overview in 4 to 6 lines.",
-  "summary": "Category-appropriate detailed summary in 6 to 10 lines.",
-  "keyPoints": [{{"id":"key_1","title":"Key point title","description":"Important highlight from the transcript."}}],
-  "topics": [{{"id":"topic_1","title":"Topic title","description":"What was discussed or taught under this topic."}}],
-  "discussionPoints": [{{"id":"point_1","title":"Discussion title","description":"Only if the audio has discussion points.","status":"pending"}}],
-  "decisions": [{{"id":"decision_1","title":"Decision title","description":"Only if a decision was actually made."}}],
-  "actionItems": [{{"id":"action_1","title":"Action title","description":"Task details.","owner":"Owner if mentioned, otherwise Not specified","deadline":"Deadline if mentioned, otherwise Not specified","status":"pending"}}],
-  "problemStatements": [{{"id":"problem_1","title":"Problem title","description":"Only if a real problem, blocker, concern, gap, or challenge was discussed."}}],
-  "solutions": [{{"id":"solution_1","title":"Solution title","description":"Only if a solution, recommendation, approach, or answer was discussed.","relatedProblemId":"problem_1"}}],
-  "risks": [{{"id":"risk_1","title":"Risk title","description":"Only if a risk, concern, uncertainty, objection, or dependency exists."}}],
-  "followUps": [{{"id":"followup_1","title":"Follow-up title","description":"Only if follow-up or review is needed."}}],
-  "suggestions": [{{"id":"suggestion_1","title":"Suggestion title","description":"Useful suggestion grounded in the transcript."}}],
-  "approaches": [{{"id":"approach_1","title":"Approach title","description":"Practical way to handle or execute something from the transcript."}}],
-  "guide": [{{"id":"guide_1","title":"Guide step title","description":"Step-by-step guidance relevant to this category."}}],
-  "workflowSteps": [{{"step":1,"title":"Step title","description":"Only if a process or sequence is present."}}],
+  "overview": "Analytical overview. Explain purpose, context, and value. Do not copy transcript.",
+  "summary": "Structured summary in natural professional language, not a transcript rewrite.",
+  "keyPoints": [{{"id":"key_1","title":"Insight title","description":"Important insight, learning, conclusion, or takeaway."}}],
+  "topics": [{{"id":"topic_1","title":"Topic title","description":"What this topic means and why it matters."}}],
+  "discussionPoints": [{{"id":"point_1","title":"Only for real discussion/review point","description":"Use only when discussion format is relevant.","status":"pending"}}],
+  "decisions": [{{"id":"decision_1","title":"Decision title","description":"Only if a decision/conclusion was made."}}],
+  "actionItems": [{{"id":"action_1","title":"Action title","description":"Task details.","owner":"Owner if explicitly mentioned","deadline":"Deadline if explicitly mentioned","status":"pending"}}],
+  "problemStatements": [{{"id":"problem_1","title":"Problem/challenge title","description":"Only if a real issue, blocker, doubt, gap, risk, or concern appears."}}],
+  "solutions": [{{"id":"solution_1","title":"Solution/answer title","description":"Only if the audio gives a solution, answer, approach, or recommendation.","relatedProblemId":"problem_1"}}],
+  "risks": [{{"id":"risk_1","title":"Risk/concern title","description":"Only if a risk, objection, dependency, uncertainty, or weakness exists."}}],
+  "followUps": [{{"id":"followup_1","title":"Follow-up title","description":"Only if follow-up is required."}}],
+  "suggestions": [{{"id":"suggestion_1","title":"Useful suggestion","description":"Useful, practical suggestion derived from the audio context."}}],
+  "approaches": [{{"id":"approach_1","title":"Approach title","description":"Practical way to act on the audio."}}],
+  "guide": [{{"id":"guide_1","title":"Guide step title","description":"Step-by-step guidance relevant to the category."}}],
+  "workflowSteps": [{{"step":1,"title":"Process step","description":"Only if a real sequence/process exists."}}],
   "categorySpecificOutput": {category_schema},
   "coverageCheck": {{
     "importantItemsCovered": [],
@@ -1075,33 +1117,26 @@ Required JSON format:
     "unclearParts": [],
     "confidenceNotes": ""
   }},
-  "mindMap": {{"title":"Audio Mind Map","nodes":[{{"id":"node_1","label":"Main topic","children":[]}}]}}
+  "mindMap": {{"title":"Audio Mind Map","nodes":[{{"id":"node_1","label":"Main theme","children":[]}}]}}
 }}
 
-Category-specific instructions:
-- For Lecture/Class/Training: focus on topic taught, key concepts, definitions, examples, revision notes, questions to practice, and study guide.
-- For Interview/HR: focus on candidate profile, questions, answer summaries, strengths, concerns, skills, fit, recommendation, and next questions.
-- For Motivational Speech/Seminar: focus on core message, takeaways, memorable quotes, lessons, action principles, and practical guide.
-- For Sales/Client/Vendor: focus on needs, objections, price/commercial points, commitments, deal status, follow-up plan, and suggested response.
-- For Product/Project: focus on requirements, features, bugs, technical decisions, dependencies, roadmap, testing checklist, and release readiness.
-- For Finance/Legal/Compliance: focus on amounts, documents, approvals, risks, legal/compliance concerns, and next compliance steps.
-- For Customer Support/Complaint: focus on customer issue, sentiment, root cause, resolution, escalation, replacement/refund, and prevention.
-- For Brainstorming/Strategy: focus on ideas, promising options, weak/rejected ideas, direction, creative approaches, execution plan, and success metrics.
-- For Personal Voice Note: convert into cleaned note, ideas, tasks, reminders, priorities, and suggested next actions.
-- For Podcast/Webinar/Panel: focus on speaker viewpoints, key themes, arguments, takeaways, quotes, shareable summary, and content ideas.
-- For Business Meeting: focus on objective, agenda, decisions, action items, owners/deadlines, blockers, risks, and next meeting preparation.
+Critical quality rules:
+- Do not copy the first sentence as the title.
+- Do not create bland transcript bullets like "Speaker discussed...".
+- Every point must add structure, meaning, implication, decision, learning, action, risk, or next step.
+- For lecture/training: keep discussionPoints empty unless there was a real discussion. Use topics, keyPoints, categorySpecificOutput, guide.
+- For motivational speech: keep decisions/actionItems/discussionPoints empty unless truly present. Use takeaways, principles, guide, suggestions.
+- For interview: put questions/answers/strengths/concerns inside categorySpecificOutput. Do not force meeting decisions.
+- For personal voice note: convert into cleaned note, tasks, reminders, priorities, and next actions.
+- For support/complaint: extract issue, root cause, sentiment, resolution, escalation, prevention.
+- For sales/vendor: extract needs, objections, commercial points, commitments, follow-up, deal status.
+- For product/project: extract requirements, bugs, dependencies, roadmap, testing, release readiness.
+- For business meeting: extract decisions, owners, deadlines, blockers, risks, next meeting preparation.
+- If an array has no supported item, return []. Never use placeholders.
+- Preserve all names, product codes, article codes, numbers, dates, prices, commitments, and deadlines.
+- Suggestions and guide can be practical, but they must be clearly based on the audio context.
 
-Strict rules:
-- Return only JSON. No markdown. No explanation.
-- Output English only.
-- Do not invent information.
-- If a field has no real transcript support, return an empty string, empty array, or empty object for that field.
-- Do not put placeholder values like "Not discussed", "No data", "None", or "N/A" inside arrays.
-- Every list item must have meaningful title/description. Remove blank items.
-- Preserve names, product codes, numbers, dates, prices, commitments, and deadlines.
-- Suggestions, approaches, and guide must be practical but still grounded in the transcript.
-
-Chunk {chunk_number} of {total_chunks}:
+Transcript chunk {chunk_number} of {total_chunks}:
 {transcript_text}
 """
 
@@ -1134,35 +1169,37 @@ def merge_meeting_analysis(
     prompt = f"""
 {ENGLISH_ONLY_RULE}
 
-You are a premium audio intelligence analyst.
-Merge these chunk analyses into one final category-wise output.
+You are creating a final premium audio intelligence report.
+Merge the chunk analyses into one category-wise result.
 
 Audio category: {category_label} ({category})
+Category guidance:
+{category_output_guidance(category)}
 
 Return ONLY one valid JSON object.
 
 Required JSON format:
 {{
-  "meetingTitle": "Meaningful title from the full conversation, not the first sentence, 5 to 8 words",
+  "meetingTitle": "meaningful title based on full audio, not transcript opening",
   "audioCategory": "{category}",
   "categoryLabel": "{category_label}",
   "categoryConfidence": {classification.get('categoryConfidence', 0.65)},
   "classificationReason": "{escape_prompt_text(classification.get('classificationReason', ''))}",
-  "overview": "Final category-appropriate overview in 4 to 6 strong lines.",
-  "summary": "Final complete summary in 6 to 10 lines.",
-  "keyPoints": [{{"id":"key_1","title":"Key point title","description":"Important highlight."}}],
-  "topics": [{{"id":"topic_1","title":"Topic title","description":"Topic details."}}],
-  "discussionPoints": [{{"id":"point_1","title":"Discussion title","description":"Only if relevant.","status":"pending"}}],
-  "decisions": [{{"id":"decision_1","title":"Decision title","description":"Only if a decision was made."}}],
-  "actionItems": [{{"id":"action_1","title":"Action title","description":"Task details.","owner":"Owner if mentioned, otherwise Not specified","deadline":"Deadline if mentioned, otherwise Not specified","status":"pending"}}],
-  "problemStatements": [{{"id":"problem_1","title":"Problem title","description":"Only if a real problem exists."}}],
-  "solutions": [{{"id":"solution_1","title":"Solution title","description":"Only if a solution or approach exists.","relatedProblemId":"problem_1"}}],
-  "risks": [{{"id":"risk_1","title":"Risk title","description":"Only if risk exists."}}],
-  "followUps": [{{"id":"followup_1","title":"Follow-up title","description":"Only if follow-up exists."}}],
-  "suggestions": [{{"id":"suggestion_1","title":"Suggestion title","description":"Useful suggestion grounded in the audio."}}],
+  "overview": "Strong final overview in 4 to 6 lines.",
+  "summary": "Complete synthesized summary in 6 to 10 lines. Do not rewrite transcript.",
+  "keyPoints": [{{"id":"key_1","title":"Insight title","description":"Important final insight."}}],
+  "topics": [{{"id":"topic_1","title":"Topic title","description":"Topic meaning and importance."}}],
+  "discussionPoints": [{{"id":"point_1","title":"Discussion/review title","description":"Only if relevant to this category.","status":"pending"}}],
+  "decisions": [{{"id":"decision_1","title":"Decision title","description":"Only if decision/conclusion exists."}}],
+  "actionItems": [{{"id":"action_1","title":"Action title","description":"Task details.","owner":"Owner if explicitly mentioned","deadline":"Deadline if explicitly mentioned","status":"pending"}}],
+  "problemStatements": [{{"id":"problem_1","title":"Problem title","description":"Real issue, blocker, doubt, gap, or challenge."}}],
+  "solutions": [{{"id":"solution_1","title":"Solution title","description":"Solution, answer, approach, or recommendation.","relatedProblemId":"problem_1"}}],
+  "risks": [{{"id":"risk_1","title":"Risk title","description":"Risk, concern, objection, dependency, or uncertainty."}}],
+  "followUps": [{{"id":"followup_1","title":"Follow-up title","description":"Only if follow-up is needed."}}],
+  "suggestions": [{{"id":"suggestion_1","title":"Suggestion title","description":"Practical suggestion derived from the audio."}}],
   "approaches": [{{"id":"approach_1","title":"Approach title","description":"Practical approach grounded in the audio."}}],
-  "guide": [{{"id":"guide_1","title":"Guide step title","description":"Practical guidance relevant to this category."}}],
-  "workflowSteps": [{{"step":1,"title":"Step title","description":"Only if sequence exists."}}],
+  "guide": [{{"id":"guide_1","title":"Guide step title","description":"Step-by-step guidance relevant to the category."}}],
+  "workflowSteps": [{{"step":1,"title":"Step title","description":"Only if a process or sequence exists."}}],
   "categorySpecificOutput": {category_schema},
   "coverageCheck": {{
     "importantItemsCovered": [],
@@ -1170,18 +1207,18 @@ Required JSON format:
     "unclearParts": [],
     "confidenceNotes": ""
   }},
-  "mindMap": {{"title":"Audio Mind Map","nodes":[{{"id":"node_1","label":"Main topic","children":[]}}]}}
+  "mindMap": {{"title":"Audio Mind Map","nodes":[{{"id":"node_1","label":"Main theme","children":[]}}]}}
 }}
 
-Merge rules:
-- The final output must match the category. Do not show generic meeting points for lecture/interview/motivation/podcast unless actually relevant.
-- Remove duplicate and blank items.
-- Preserve distinct decisions, tasks, risks, questions, numbers, dates, people, deadlines, prices, commitments, and names.
-- Do not invent facts.
+Merge and quality rules:
+- Remove duplicates and transcript-like repetition.
+- Do not force the same sections for every audio type.
 - Leave unsupported sections empty.
-- Generate a meaningful meetingTitle after understanding all chunks.
-- categorySpecificOutput must be filled according to {category_label}; do not use the same template for every category.
-- coverageCheck must mention what was covered and any unclear/missing areas.
+- Put the strongest category-wise information into categorySpecificOutput.
+- For lecture, motivation, personal voice note, and interview, avoid generic Discussion Points unless real discussion exists.
+- Include practical Suggestions, Approaches, and Guide only when helpful and grounded.
+- Use coverageCheck to identify covered areas, unclear parts, and potential missing details.
+- Preserve names, numbers, dates, prices, product codes, deadlines, commitments, and speaker-specific facts.
 
 Chunk analyses:
 {json.dumps(chunk_results, ensure_ascii=False)}
@@ -1197,6 +1234,519 @@ Chunk analyses:
     return fallback_merge_analyses(chunk_results, transcript_text, classification)
 
 
+def refine_analysis_premium(
+    transcript_text: str,
+    draft_analysis: Dict[str, Any],
+    classification: Dict[str, Any],
+) -> Dict[str, Any]:
+    category = classification.get("audioCategory", "general_conversation")
+    category_label = classification.get("categoryLabel", category_label_for(category))
+    category_schema = json.dumps(
+        CATEGORY_SPECIFIC_SCHEMAS.get(category, CATEGORY_SPECIFIC_SCHEMAS["general_conversation"]),
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    prompt = f"""
+{ENGLISH_ONLY_RULE}
+
+You are the final quality layer of a premium AI audio notes product.
+The current draft may be too close to the transcript. Rewrite it into a better category-wise output.
+
+Audio category: {category_label} ({category})
+Category guidance:
+{category_output_guidance(category)}
+
+What to improve:
+- Create insight, structure, and usefulness beyond plain transcript summary.
+- Make the title meaningful from the complete audio, not the first sentence.
+- Fill categorySpecificOutput according to the category schema.
+- Keep only relevant top-level sections. Empty irrelevant sections.
+- Add practical suggestions, approaches, and guide when useful.
+- Preserve real facts only. Do not invent people, numbers, dates, amounts, promises, or decisions.
+
+Return ONLY valid JSON with this exact shape:
+{{
+  "meetingTitle": "5 to 8 word context-aware title",
+  "audioCategory": "{category}",
+  "categoryLabel": "{category_label}",
+  "categoryConfidence": {classification.get('categoryConfidence', 0.65)},
+  "classificationReason": "{escape_prompt_text(classification.get('classificationReason', ''))}",
+  "overview": "premium overview",
+  "summary": "premium synthesized summary",
+  "keyPoints": [],
+  "topics": [],
+  "discussionPoints": [],
+  "decisions": [],
+  "actionItems": [],
+  "problemStatements": [],
+  "solutions": [],
+  "risks": [],
+  "followUps": [],
+  "suggestions": [],
+  "approaches": [],
+  "guide": [],
+  "workflowSteps": [],
+  "categorySpecificOutput": {category_schema},
+  "coverageCheck": {{
+    "importantItemsCovered": [],
+    "possibleMissingItems": [],
+    "unclearParts": [],
+    "confidenceNotes": ""
+  }},
+  "mindMap": {{"title":"Audio Mind Map","nodes":[]}}
+}}
+
+Item format rules:
+- For common lists use objects with id, title, description.
+- For actionItems include id, title, description, owner, deadline, status.
+- For discussionPoints include id, title, description, status.
+- For workflowSteps include step, title, description.
+- No placeholders like N/A, None, Not discussed, Not specified inside arrays. Use empty array instead.
+
+Draft analysis:
+{json.dumps(draft_analysis, ensure_ascii=False)}
+
+Transcript context from start, middle, and end:
+{make_transcript_context(transcript_text, max_chars=14000)}
+"""
+
+    try:
+        parsed = safe_json_parse(call_sarvam_chat(prompt))
+        if not is_analysis_empty(parsed):
+            parsed.update(classification)
+            return ensure_minimum_analysis(parsed, transcript_text)
+    except Exception:
+        pass
+
+    return draft_analysis
+
+
+def category_output_guidance(category: str) -> str:
+    guidance = {
+        "business_meeting": "Use executive notes: objective, agenda, decisions, action items, owners, deadlines, blockers, risks, next meeting preparation. Discussion points are relevant here.",
+        "sales_client_vendor_call": "Use commercial notes: client/vendor need, objections, price/commercial terms, commitments, deal status, follow-up plan, suggested response. Discussion points are relevant only if they track negotiation topics.",
+        "lecture_class_training": "Use learning notes: topic taught, learning objectives, key concepts, definitions, examples, formulas/frameworks, revision notes, practice questions, study guide. Avoid meeting-style decisions and discussion points unless students actually discussed something.",
+        "interview_hr_discussion": "Use evaluation notes: interview purpose, candidate profile, questions asked, answer summaries, strengths, concerns, skills observed, culture fit, recommendation, next round questions. Avoid generic meeting discussion points.",
+        "motivational_speech_seminar": "Use inspirational intelligence: core message, key takeaways, memorable quotes, life lessons, action principles, practical guide, audience impact, daily actions. Avoid decisions/action items unless explicit.",
+        "brainstorming_strategy": "Use strategy notes: goal, ideas generated, promising ideas, weak ideas, strategic direction, creative approaches, execution plan, success metrics. Discussion points can be used if ideas were debated.",
+        "product_project_discussion": "Use project intelligence: project name, requirements, features, bugs/issues, technical decisions, dependencies, roadmap, testing checklist, release readiness. Include action items when owners/tasks exist.",
+        "finance_legal_compliance": "Use finance/legal notes: financial summary, amounts, documents, approvals, compliance risks, legal concerns, payment/refund status, next compliance steps. Avoid creative suggestions not grounded in compliance context.",
+        "customer_support_complaint": "Use support notes: customer issue, sentiment, root cause, resolution, escalation, refund/replacement, support follow-up, prevention suggestions. Focus on solving the issue.",
+        "personal_voice_note_idea": "Use personal productivity notes: cleaned note, ideas, tasks, reminders, priorities, next actions, converted professional note. Avoid meeting sections.",
+        "podcast_webinar_panel": "Use content notes: main topic, speaker viewpoints, key themes, arguments, audience takeaways, quotes, shareable summary, content ideas. Avoid action items unless explicit.",
+        "general_conversation": "Use universal notes: conversation summary, important points, possible actions, people/dates/numbers, unclear sections, suggested category.",
+    }
+    return guidance.get(category, guidance["general_conversation"])
+
+
+def ensure_category_specific_output(
+    analysis_result: Dict[str, Any],
+    classification: Dict[str, Any],
+    transcript_text: str,
+) -> Dict[str, Any]:
+    result = dict(analysis_result)
+    category = classification.get("audioCategory", result.get("audioCategory", "general_conversation"))
+    current = normalize_dynamic_map(result.get("categorySpecificOutput", {}))
+
+    if current:
+        result["categorySpecificOutput"] = current
+        return result
+
+    key_points = result.get("keyPoints", [])
+    topics = result.get("topics", [])
+    decisions = result.get("decisions", [])
+    action_items = result.get("actionItems", [])
+    problems = result.get("problemStatements", [])
+    solutions = result.get("solutions", [])
+    risks = result.get("risks", [])
+    followups = result.get("followUps", [])
+    suggestions = result.get("suggestions", [])
+    guide = result.get("guide", [])
+    summary = result.get("summary", "")
+    overview = result.get("overview", "")
+    title = result.get("meetingTitle", "") or generate_contextual_title_fallback(result, transcript_text)
+
+    if category == "business_meeting":
+        current = {
+            "meetingObjective": overview,
+            "keyAgenda": map_items_to_dynamic_list(topics or key_points),
+            "decisionsTaken": map_items_to_dynamic_list(decisions),
+            "actionItems": map_items_to_dynamic_list(action_items),
+            "ownersAndDeadlines": map_items_to_dynamic_list(action_items),
+            "blockers": map_items_to_dynamic_list(problems),
+            "risks": map_items_to_dynamic_list(risks),
+            "nextMeetingPreparation": map_items_to_dynamic_list(followups or guide),
+            "managementSummary": summary,
+        }
+    elif category == "sales_client_vendor_call":
+        current = {
+            "purposeOfCall": overview,
+            "clientNeeds": map_items_to_dynamic_list(topics or key_points),
+            "objectionsOrConcerns": map_items_to_dynamic_list(risks or problems),
+            "priceOrCommercialPoints": extract_commercial_mentions(transcript_text),
+            "commitmentsMade": map_items_to_dynamic_list(decisions or action_items),
+            "followUpPlan": map_items_to_dynamic_list(followups or action_items),
+            "suggestedResponse": map_items_to_dynamic_list(suggestions),
+            "dealStatus": infer_deal_status(result, transcript_text),
+        }
+    elif category == "lecture_class_training":
+        current = {
+            "topicTaught": title,
+            "learningObjectives": map_items_to_dynamic_list(topics[:3] or key_points[:3]),
+            "keyConcepts": map_items_to_dynamic_list(key_points or topics),
+            "definitions": [],
+            "examplesExplained": extract_example_sentences(transcript_text),
+            "importantFormulasOrFrameworks": [],
+            "revisionNotes": map_items_to_dynamic_list(topics or key_points),
+            "questionsToPractice": build_practice_questions_from_topics(topics or key_points),
+            "studyGuide": map_items_to_dynamic_list(guide or key_points),
+        }
+    elif category == "interview_hr_discussion":
+        current = {
+            "interviewPurpose": overview,
+            "candidateProfile": extract_candidate_profile(transcript_text),
+            "questionsAsked": extract_question_sentences(transcript_text),
+            "answerSummary": map_items_to_dynamic_list(key_points or topics),
+            "strengths": map_items_to_dynamic_list(solutions or key_points[:3]),
+            "weaknessesOrConcerns": map_items_to_dynamic_list(risks or problems),
+            "skillsObserved": extract_skill_mentions(transcript_text),
+            "cultureFitNotes": summary,
+            "finalRecommendation": infer_interview_recommendation(result),
+            "nextRoundQuestions": build_practice_questions_from_topics(risks or topics),
+        }
+    elif category == "motivational_speech_seminar":
+        current = {
+            "coreMessage": overview or summary,
+            "keyTakeaways": map_items_to_dynamic_list(key_points or topics),
+            "memorableQuotes": extract_quote_like_lines(transcript_text),
+            "lifeLessons": map_items_to_dynamic_list(topics or key_points),
+            "actionPrinciples": map_items_to_dynamic_list(guide or suggestions),
+            "practicalGuide": map_items_to_dynamic_list(guide),
+            "audienceImpact": summary,
+            "suggestedDailyActions": map_items_to_dynamic_list(suggestions or guide),
+        }
+    elif category == "brainstorming_strategy":
+        current = {
+            "brainstormingGoal": overview,
+            "ideasGenerated": map_items_to_dynamic_list(topics or key_points),
+            "promisingIdeas": map_items_to_dynamic_list(suggestions or solutions),
+            "rejectedOrWeakIdeas": map_items_to_dynamic_list(risks or problems),
+            "strategicDirection": map_items_to_dynamic_list(decisions or key_points),
+            "creativeApproaches": map_items_to_dynamic_list(result.get("approaches", []) or suggestions),
+            "executionPlan": map_items_to_dynamic_list(action_items or guide),
+            "successMetrics": extract_metric_mentions(transcript_text),
+        }
+    elif category == "product_project_discussion":
+        current = {
+            "projectName": title,
+            "requirements": map_items_to_dynamic_list(topics or key_points),
+            "featuresDiscussed": map_items_to_dynamic_list(topics),
+            "bugsOrIssues": map_items_to_dynamic_list(problems),
+            "technicalDecisions": map_items_to_dynamic_list(decisions),
+            "dependencies": map_items_to_dynamic_list(risks),
+            "roadmap": map_items_to_dynamic_list(action_items or followups),
+            "testingChecklist": map_items_to_dynamic_list(guide),
+            "releaseReadiness": summary,
+        }
+    elif category == "finance_legal_compliance":
+        current = {
+            "financialSummary": overview or summary,
+            "amountsMentioned": extract_commercial_mentions(transcript_text),
+            "documentsRequired": extract_document_mentions(transcript_text),
+            "approvalsNeeded": map_items_to_dynamic_list(action_items or followups),
+            "complianceRisks": map_items_to_dynamic_list(risks or problems),
+            "legalConcerns": map_items_to_dynamic_list(problems),
+            "paymentOrRefundStatus": infer_payment_status(transcript_text),
+            "nextComplianceSteps": map_items_to_dynamic_list(guide or action_items),
+        }
+    elif category == "customer_support_complaint":
+        current = {
+            "customerIssue": overview,
+            "customerSentiment": infer_sentiment(transcript_text),
+            "rootCause": first_item_description(problems),
+            "resolutionSuggested": map_items_to_dynamic_list(solutions or suggestions),
+            "escalationNeeded": bool(risks or followups),
+            "refundOrReplacementMentioned": infer_refund_replacement(transcript_text),
+            "supportFollowUp": map_items_to_dynamic_list(followups or action_items),
+            "preventionSuggestion": map_items_to_dynamic_list(suggestions),
+        }
+    elif category == "personal_voice_note_idea":
+        current = {
+            "cleanedNote": summary or overview,
+            "ideas": map_items_to_dynamic_list(topics or key_points),
+            "tasks": map_items_to_dynamic_list(action_items),
+            "reminders": map_items_to_dynamic_list(followups),
+            "priorityItems": map_items_to_dynamic_list(key_points[:5]),
+            "suggestedNextActions": map_items_to_dynamic_list(suggestions or guide),
+            "convertedToProfessionalNote": summary or overview,
+        }
+    elif category == "podcast_webinar_panel":
+        current = {
+            "mainTopic": title,
+            "speakerViewpoints": map_items_to_dynamic_list(topics or key_points),
+            "keyThemes": map_items_to_dynamic_list(key_points or topics),
+            "importantArguments": map_items_to_dynamic_list(result.get("approaches", []) or key_points),
+            "audienceTakeaways": map_items_to_dynamic_list(suggestions or key_points),
+            "interestingQuotes": extract_quote_like_lines(transcript_text),
+            "summaryForSharing": summary,
+            "contentIdeasFromAudio": map_items_to_dynamic_list(suggestions),
+        }
+    else:
+        current = {
+            "conversationSummary": summary or overview,
+            "importantPoints": map_items_to_dynamic_list(key_points or topics),
+            "possibleActions": map_items_to_dynamic_list(action_items or suggestions),
+            "peopleMentioned": extract_people_like_terms(transcript_text),
+            "datesOrNumbersMentioned": extract_metric_mentions(transcript_text),
+            "unclearSections": [],
+            "suggestedCategory": category_label_for(category),
+        }
+
+    result["categorySpecificOutput"] = normalize_dynamic_map(current)
+    return result
+
+
+def adapt_analysis_for_category(
+    analysis_result: Dict[str, Any],
+    classification: Dict[str, Any],
+) -> Dict[str, Any]:
+    result = dict(analysis_result)
+    category = classification.get("audioCategory", result.get("audioCategory", "general_conversation"))
+
+    # These categories should not look like generic business meetings.
+    non_discussion_categories = {
+        "lecture_class_training",
+        "motivational_speech_seminar",
+        "interview_hr_discussion",
+        "personal_voice_note_idea",
+    }
+
+    if category in non_discussion_categories:
+        result["discussionPoints"] = []
+        if category in {"lecture_class_training", "motivational_speech_seminar", "podcast_webinar_panel"}:
+            result["decisions"] = []
+            result["actionItems"] = []
+
+    # Remove empty/generic transcript-like items from all sections.
+    for key in ["keyPoints", "topics", "discussionPoints", "decisions", "actionItems", "problemStatements", "solutions", "risks", "followUps", "suggestions", "approaches", "guide", "workflowSteps"]:
+        value = result.get(key, [])
+        if isinstance(value, list):
+            result[key] = [item for item in value if has_displayable_value(item) and not item_looks_like_transcript_filler(item)]
+
+    return remove_empty_analysis_fields(result)
+
+
+def map_items_to_dynamic_list(items: Any) -> List[Dict[str, str]]:
+    if not isinstance(items, list):
+        return []
+
+    mapped = []
+    for index, item in enumerate(items):
+        if isinstance(item, dict):
+            title = clean_text_field(item.get("title") or item.get("name") or f"Item {index + 1}")
+            description = clean_text_field(item.get("description") or item.get("details") or item.get("text") or "")
+            extra_parts = []
+            for key in ["owner", "deadline", "status"]:
+                value = clean_text_field(item.get(key, ""))
+                if value:
+                    extra_parts.append(f"{key.title()}: {value}")
+            if extra_parts:
+                description = (description + "\n" + " | ".join(extra_parts)).strip()
+        else:
+            title = f"Item {index + 1}"
+            description = clean_text_field(item)
+
+        if title or description:
+            mapped.append({
+                "title": title or f"Item {index + 1}",
+                "description": description,
+            })
+    return mapped
+
+
+def first_item_description(items: Any) -> str:
+    mapped = map_items_to_dynamic_list(items)
+    if not mapped:
+        return ""
+    return mapped[0].get("description") or mapped[0].get("title") or ""
+
+
+def item_looks_like_transcript_filler(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    text = " ".join(str(item.get(key, "")) for key in ["title", "description"]).lower().strip()
+    if not text:
+        return True
+    filler_patterns = [
+        "speaker discussed",
+        "the speaker discussed",
+        "speaker mentioned",
+        "the speaker mentioned",
+        "audio was transcribed",
+        "transcript captured",
+        "main meeting discussion",
+        "captured meeting discussion",
+    ]
+    return any(pattern in text for pattern in filler_patterns)
+
+
+def extract_question_sentences(text: str) -> List[Dict[str, str]]:
+    candidates = re.split(r"(?<=[?.!])\s+", str(text or ""))
+    results = []
+    for sentence in candidates:
+        cleaned = clean_text_field(sentence)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        is_question = "?" in cleaned or lowered.startswith(("what ", "why ", "how ", "when ", "where ", "who ", "can you", "could you", "tell me", "explain"))
+        if is_question:
+            results.append({"title": f"Question {len(results) + 1}", "description": make_excerpt(cleaned, max_chars=240)})
+        if len(results) >= 8:
+            break
+    return results
+
+
+def extract_example_sentences(text: str) -> List[Dict[str, str]]:
+    sentences = re.split(r"(?<=[?.!])\s+", str(text or ""))
+    results = []
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(token in lowered for token in ["example", "for example", "such as", "suppose", "imagine"]):
+            cleaned = clean_text_field(sentence)
+            if cleaned:
+                results.append({"title": f"Example {len(results) + 1}", "description": make_excerpt(cleaned, max_chars=260)})
+        if len(results) >= 6:
+            break
+    return results
+
+
+def extract_commercial_mentions(text: str) -> List[Dict[str, str]]:
+    pattern = r"(?:₹|rs\.?|inr|usd|\$)?\s*\d+(?:[,.]\d+)*(?:\s*(?:k|lakh|lakhs|crore|crores|%|percent))?"
+    matches = re.findall(pattern, str(text or ""), flags=re.IGNORECASE)
+    cleaned = []
+    for match in matches:
+        value = clean_text_field(match)
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return [{"title": "Amount / Number Mentioned", "description": value} for value in cleaned[:10]]
+
+
+def extract_metric_mentions(text: str) -> List[Dict[str, str]]:
+    pattern = r"\b\d{1,4}(?:[,.]\d+)*(?:\s*(?:%|percent|days?|weeks?|months?|years?|hours?|minutes?|k|lakh|lakhs|crore|crores|pairs?|units?|orders?))?\b"
+    matches = re.findall(pattern, str(text or ""), flags=re.IGNORECASE)
+    unique = []
+    for match in matches:
+        value = clean_text_field(match)
+        if value and value not in unique:
+            unique.append(value)
+    return [{"title": "Date / Number / Metric", "description": value} for value in unique[:12]]
+
+
+def extract_document_mentions(text: str) -> List[Dict[str, str]]:
+    terms = ["invoice", "agreement", "contract", "gst", "pi", "po", "purchase order", "receipt", "approval", "document", "certificate", "license"]
+    lowered = str(text or "").lower()
+    results = []
+    for term in terms:
+        if term in lowered:
+            results.append({"title": term.title(), "description": f"{term.title()} was mentioned in the audio."})
+    return results[:8]
+
+
+def extract_skill_mentions(text: str) -> List[Dict[str, str]]:
+    terms = ["excel", "python", "flutter", "marketing", "sales", "communication", "leadership", "management", "design", "backend", "frontend", "analytics", "finance", "accounting"]
+    lowered = str(text or "").lower()
+    return [{"title": term.title(), "description": f"{term.title()} was referenced."} for term in terms if term in lowered][:10]
+
+
+def extract_people_like_terms(text: str) -> List[Dict[str, str]]:
+    # Conservative fallback: do not guess too aggressively.
+    matches = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b", str(text or ""))
+    skip = {"Speaker", "Audio", "Meeting", "Today", "Tomorrow", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
+    unique = []
+    for match in matches:
+        if match in skip:
+            continue
+        if match not in unique:
+            unique.append(match)
+    return [{"title": "Person / Name Mentioned", "description": value} for value in unique[:10]]
+
+
+def extract_quote_like_lines(text: str) -> List[Dict[str, str]]:
+    sentences = re.split(r"(?<=[?.!])\s+", str(text or ""))
+    results = []
+    for sentence in sentences:
+        cleaned = clean_text_field(sentence)
+        word_count = len(cleaned.split())
+        if 6 <= word_count <= 28 and any(token in cleaned.lower() for token in ["must", "should", "never", "always", "life", "success", "believe", "remember"]):
+            results.append({"title": f"Quote {len(results) + 1}", "description": cleaned})
+        if len(results) >= 5:
+            break
+    return results
+
+
+def build_practice_questions_from_topics(items: Any) -> List[Dict[str, str]]:
+    mapped = map_items_to_dynamic_list(items)
+    questions = []
+    for item in mapped[:6]:
+        title = item.get("title", "topic")
+        questions.append({
+            "title": f"Review {len(questions) + 1}",
+            "description": f"Explain {title} in your own words and give one practical example.",
+        })
+    return questions
+
+
+def infer_deal_status(result: Dict[str, Any], text: str) -> str:
+    lowered = str(text or "").lower()
+    if any(word in lowered for word in ["confirmed", "approved", "final", "closed", "done"]):
+        return "likely confirmed"
+    if any(word in lowered for word in ["pending", "follow up", "waiting", "discuss", "negotiate"]):
+        return "pending / follow-up required"
+    return "unclear"
+
+
+def infer_payment_status(text: str) -> str:
+    lowered = str(text or "").lower()
+    if "paid" in lowered or "payment done" in lowered:
+        return "payment appears completed"
+    if "pending" in lowered and "payment" in lowered:
+        return "payment appears pending"
+    if "refund" in lowered:
+        return "refund mentioned"
+    return "unclear"
+
+
+def infer_refund_replacement(text: str) -> str:
+    lowered = str(text or "").lower()
+    values = []
+    if "refund" in lowered:
+        values.append("refund mentioned")
+    if "replacement" in lowered or "replace" in lowered:
+        values.append("replacement mentioned")
+    return ", ".join(values) if values else ""
+
+
+def infer_sentiment(text: str) -> str:
+    lowered = str(text or "").lower()
+    if any(word in lowered for word in ["angry", "frustrated", "very bad", "not happy", "complaint", "issue"]):
+        return "negative"
+    if any(word in lowered for word in ["happy", "good", "satisfied", "thanks", "great"]):
+        return "positive"
+    return "neutral / unclear"
+
+
+def infer_interview_recommendation(result: Dict[str, Any]) -> str:
+    risks = result.get("risks") or result.get("problemStatements") or []
+    strengths = result.get("solutions") or result.get("keyPoints") or []
+    if strengths and not risks:
+        return "Potentially positive, based on the captured discussion. Final decision needs human review."
+    if strengths and risks:
+        return "Mixed. There are positives, but concerns should be reviewed before final decision."
+    return "No clear recommendation can be made from the captured audio."
+
+
+
 def generate_meaningful_title(
     transcript_text: str,
     analysis_result: Dict[str, Any],
@@ -1208,34 +1758,167 @@ def generate_meaningful_title(
     prompt = f"""
 {ENGLISH_ONLY_RULE}
 
-Create one meaningful title for this audio after understanding the complete context.
-Do NOT copy the first sentence of the transcript.
-Do NOT include date, time, file extension, or speaker label.
-Do NOT use generic titles like "Meeting Notes" or "Audio Summary" unless no topic is clear.
+Create ONE premium, meaningful title for this audio.
+The title must be based on the complete context, not the first sentence.
+
+Rules:
+- 5 to 8 words.
+- Do NOT copy the transcript opening.
+- Do NOT start with filler words like hello, today, okay, so, basically, everyone.
+- Do NOT include date, time, file extension, or speaker label.
+- Do NOT use generic titles like Meeting Notes, Audio Summary, Discussion Summary.
+- Make it sound like a professional saved note title.
 
 Audio category: {category_label}
-Existing rough title: {existing_title}
 Overview: {analysis_result.get('overview', '')}
 Summary: {analysis_result.get('summary', '')}
-Key topics: {json.dumps(analysis_result.get('topics', []), ensure_ascii=False)}
+Topics: {json.dumps(analysis_result.get('topics', []), ensure_ascii=False)}
+Key points: {json.dumps(analysis_result.get('keyPoints', []), ensure_ascii=False)}
+Category-specific output: {json.dumps(analysis_result.get('categorySpecificOutput', {}), ensure_ascii=False)}
 
-Transcript context:
-{make_transcript_context(transcript_text, max_chars=9000)}
+Transcript context from start, middle, and end:
+{make_transcript_context(transcript_text, max_chars=12000)}
 
 Return ONLY valid JSON:
-{{"meetingTitle":"5 to 8 word meaningful title"}}
+{{"meetingTitle":"title here"}}
 """
 
     try:
         parsed = parse_json_object(call_sarvam_chat(prompt))
-        title = str(parsed.get("meetingTitle") or parsed.get("title") or "").strip()
-        title = clean_generated_title(title)
-        if title:
+        title = clean_generated_title(str(parsed.get("meetingTitle") or parsed.get("title") or ""))
+        if title and not is_bad_generated_title(title, transcript_text):
             return title
     except Exception:
         pass
 
-    return clean_generated_title(existing_title) or generate_title_from_analysis(analysis_result, transcript_text)
+    fallback = generate_contextual_title_fallback(analysis_result, transcript_text)
+    if fallback and not is_bad_generated_title(fallback, transcript_text):
+        return fallback
+
+    if existing_title and not is_bad_generated_title(existing_title, transcript_text):
+        return clean_generated_title(existing_title)
+
+    return generate_title_from_text(transcript_text)
+
+
+def is_bad_generated_title(title: str, transcript_text: str) -> bool:
+    cleaned_title = clean_generated_title(title).lower()
+    if not cleaned_title:
+        return True
+
+    generic_titles = {
+        "meeting notes",
+        "audio notes",
+        "audio summary",
+        "discussion summary",
+        "meeting analysis",
+        "general conversation",
+        "captured meeting discussion",
+    }
+    if cleaned_title in generic_titles:
+        return True
+
+    bad_openers = {"hello", "hi", "today", "okay", "ok", "so", "basically", "everyone", "good", "morning", "afternoon", "evening"}
+    first_word = cleaned_title.split()[0] if cleaned_title.split() else ""
+    if first_word in bad_openers:
+        return True
+
+    opening = get_transcript_opening(transcript_text, max_words=35).lower()
+    if not opening:
+        return False
+
+    title_words = meaningful_words(cleaned_title)
+    opening_words = meaningful_words(opening)
+
+    if not title_words:
+        return True
+
+    overlap = sum(1 for word in title_words if word in opening_words)
+    overlap_ratio = overlap / max(len(title_words), 1)
+
+    # If most title words are from only the first sentence, it is probably copied.
+    return overlap_ratio >= 0.78 and len(title_words) >= 3
+
+
+def get_transcript_opening(text: str, max_words: int = 35) -> str:
+    words = str(text or "").split()
+    return " ".join(words[:max_words])
+
+
+def meaningful_words(text: str) -> List[str]:
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]+", str(text or "").lower())
+    return [word for word in words if word not in TITLE_STOPWORDS and len(word) > 2]
+
+
+def generate_contextual_title_fallback(analysis_result: Dict[str, Any], transcript_text: str) -> str:
+    category = analysis_result.get("audioCategory", "general_conversation")
+    category_label = category_label_for(category)
+
+    for key in ["topics", "keyPoints", "decisions", "actionItems", "problemStatements", "solutions", "suggestions"]:
+        items = analysis_result.get(key, [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = clean_generated_title(str(item.get("title") or ""))
+            if title and not is_bad_generated_title(title, transcript_text):
+                return title
+
+    category_specific = normalize_dynamic_map(analysis_result.get("categorySpecificOutput", {}))
+    for _, value in category_specific.items():
+        candidate = title_from_dynamic_value(value)
+        candidate = clean_generated_title(candidate)
+        if candidate and not is_bad_generated_title(candidate, transcript_text):
+            return candidate
+
+    keywords = extract_salient_keywords(transcript_text, max_terms=5)
+    if keywords:
+        topic = " ".join(word.title() for word in keywords[:4])
+        if category == "lecture_class_training":
+            return clean_generated_title(f"Learning Notes on {topic}")
+        if category == "interview_hr_discussion":
+            return clean_generated_title(f"Interview Discussion on {topic}")
+        if category == "motivational_speech_seminar":
+            return clean_generated_title(f"Motivational Talk on {topic}")
+        if category == "sales_client_vendor_call":
+            return clean_generated_title(f"Client Discussion on {topic}")
+        if category == "product_project_discussion":
+            return clean_generated_title(f"Project Discussion on {topic}")
+        return clean_generated_title(f"{category_label.split('/')[0].strip()} on {topic}")
+
+    return "Audio Intelligence Notes"
+
+
+def title_from_dynamic_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            candidate = title_from_dynamic_value(item)
+            if candidate:
+                return candidate
+    if isinstance(value, dict):
+        for key in ["title", "topic", "mainTopic", "topicTaught", "projectName", "coreMessage", "purposeOfCall", "customerIssue"]:
+            if value.get(key):
+                return str(value.get(key))
+        for item in value.values():
+            candidate = title_from_dynamic_value(item)
+            if candidate:
+                return candidate
+    return ""
+
+
+def extract_salient_keywords(text: str, max_terms: int = 6) -> List[str]:
+    words = meaningful_words(text)
+    counts: Dict[str, int] = {}
+    for word in words:
+        if len(word) < 4:
+            continue
+        counts[word] = counts.get(word, 0) + 1
+
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return [word for word, _ in ranked[:max_terms]]
 
 
 def clean_generated_title(value: str) -> str:
@@ -1260,21 +1943,9 @@ def clean_generated_title(value: str) -> str:
     return title
 
 
+
 def generate_title_from_analysis(analysis_result: Dict[str, Any], transcript_text: str) -> str:
-    for key in ["topics", "keyPoints", "decisions", "actionItems", "discussionPoints"]:
-        items = analysis_result.get(key, [])
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict):
-                    title = clean_generated_title(str(item.get("title", "") or ""))
-                    if title:
-                        return title
-
-    overview = clean_text_field(analysis_result.get("overview", ""))
-    summary = clean_text_field(analysis_result.get("summary", ""))
-
-    return generate_title_from_text(overview or summary or transcript_text)
-
+    return generate_contextual_title_fallback(analysis_result, transcript_text)
 
 def empty_meeting_analysis() -> Dict[str, Any]:
     return {
@@ -1426,7 +2097,7 @@ def fallback_analysis_from_transcript(
     result = empty_meeting_analysis()
     result.update(classification)
     excerpt = make_excerpt(transcript_text, max_chars=700)
-    result["meetingTitle"] = generate_title_from_text(transcript_text)
+    result["meetingTitle"] = generate_contextual_title_fallback(result, transcript_text)
     result["overview"] = f"The audio was transcribed successfully. This fallback overview is based directly on the transcript excerpt: {excerpt}"
     result["summary"] = "The transcript was captured, but the structured AI analysis response was not reliable enough to extract every section. Please review the transcript for exact details."
     result["keyPoints"] = [{"id": "key_1", "title": "Transcript Captured", "description": excerpt}]
@@ -1829,27 +2500,20 @@ def looks_like_json(value: str) -> bool:
     return cleaned.startswith("{") or cleaned.startswith("[") or '"overview"' in cleaned or '"discussionPoints"' in cleaned or '"audioCategory"' in cleaned
 
 
+
 def generate_title_from_text(text: str) -> str:
     cleaned = " ".join(str(text or "").strip().split())
     if not cleaned:
-        return "Audio Notes"
+        return "Audio Intelligence Notes"
 
-    cleaned = cleaned.replace("Speaker:", "").strip()
-    sentence_parts = [part.strip() for part in cleaned.replace("?", ".").replace("!", ".").split(".") if part.strip()]
+    keywords = extract_salient_keywords(cleaned, max_terms=5)
+    if keywords:
+        title = " ".join(word.title() for word in keywords[:5])
+        return clean_generated_title(title) or "Audio Intelligence Notes"
 
-    candidate = ""
-    for part in sentence_parts[:5]:
-        words = [word for word in part.split() if len(word) > 2]
-        if len(words) >= 4:
-            candidate = " ".join(words[:8])
-            break
-
-    if not candidate:
-        words = [word for word in cleaned.split() if len(word) > 2]
-        candidate = " ".join(words[:8])
-
-    return clean_generated_title(candidate) or "Audio Notes"
-
+    # Last-resort only. This should rarely be used.
+    words = [word for word in cleaned.split() if len(word) > 3]
+    return clean_generated_title(" ".join(words[:6])) or "Audio Intelligence Notes"
 
 def generate_overview_fallback(transcript_text: str, summary: str) -> str:
     if summary and not looks_like_json(summary):
